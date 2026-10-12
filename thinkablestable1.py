@@ -30,7 +30,7 @@ logger = logging.getLogger("AO_LACCP_SOC")
 app = dash.Dash(__name__)
 app.title = "AO-LACCP SOC | SIEM-X Engine"
 
-MAX_EVENTS = 400
+MAX_EVENTS = 3000
 MAX_UPLOAD_ROWS = 3000
 RISK_THRESHOLD = 0.65
 ATTACK_TYPES = [
@@ -172,17 +172,17 @@ def parse_upload(contents):
             df["timestamp"] = utc_now()
         else:
             df["timestamp"] = df["timestamp"].fillna(utc_now()).astype(str)
-        events = []
-        for _, row in df.iterrows():
-            crypto_label, _ = crypto_engine("AUTO", float(row["risk_score"]))
-            events.append({
-                "timestamp": str(row["timestamp"]),
-                "attack_type": str(row["attack_type"]),
-                "risk_score": round(float(row["risk_score"]), 4),
-                "latency": round(float(row["latency"]), 2),
-                "crypto": crypto_label, "source": "Uploaded CSV",
-            })
-        return events, " ".join(notes) if notes else f"Successfully loaded {len(events):,} rows."
+        # Vectorized conversion is much faster than iterating over every row.
+        df["risk_score"] = df["risk_score"].round(4)
+        df["latency"] = df["latency"].round(2)
+        df["crypto"] = df["risk_score"].map(
+            lambda value: crypto_engine("AUTO", float(value))[0]
+        )
+        df["source"] = "Uploaded CSV"
+        events = df[["timestamp", "attack_type", "risk_score", "latency", "crypto", "source"]].to_dict(orient="records")
+        message = " ".join(notes) if notes else f"Successfully loaded {len(events):,} rows."
+        message += f" Dataset contains {len(df.columns):,} columns."
+        return events, message
     except Exception as exc:
         logger.exception("CSV upload failed")
         return [], f"Could not read the CSV: {type(exc).__name__}."
@@ -348,6 +348,7 @@ app.layout = html.Div(style=STYLE, children=[
     dcc.Store(id="event-store", storage_type="memory", data={
         "events": [], "dataset_name": "Synthetic event generator", "upload_message": ""
     }),
+    dcc.Store(id="ml-cache", storage_type="memory", data=None),
     html.Div(style=CARD, children=[
         html.H3("Data Source"),
         dcc.Upload(id="upload_data", children=html.Div([
@@ -357,11 +358,7 @@ app.layout = html.Div(style=STYLE, children=[
         # This filename label updates independently, before CSV parsing finishes.
         html.Div(id="selected_filename", style={"marginTop": "10px", "fontWeight": "bold", "color": "#7dd3fc"}),
         html.Div(id="dataset_name", style={"marginTop": "6px"}),
-        dcc.Loading(
-            id="upload-loading",
-            type="circle",
-            children=html.Div(id="upload_status", style={"marginTop": "8px"}),
-        ),
+        html.Div(id="upload_status", style={"marginTop": "8px"}),
     ]),
     html.Div(style=CARD, children=[
         html.H3("Model and Cryptographic Configuration"),
@@ -378,7 +375,7 @@ app.layout = html.Div(style=STYLE, children=[
         html.Div(id="crypto_advice", style={"marginTop": "14px"}),
     ]),
     html.Div(style=CARD, children=[html.H3("Live Threat Stream"), html.Div(id="live_feed", children="Initializing..."),
-                                     dcc.Interval(id="interval", interval=2500, n_intervals=0)]),
+                                     dcc.Interval(id="interval", interval=5000, n_intervals=0)]),
     html.Div(style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(320px, 1fr))", "gap": "16px"},
              children=[dcc.Graph(id="risk_graph"), dcc.Graph(id="latency_graph")]),
     html.Div(style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(320px, 1fr))", "gap": "16px"},
@@ -414,12 +411,12 @@ def show_selected_filename(filename):
      Output("soc_attack_stream", "figure"), Output("soc_risk_gauge", "figure"),
      Output("dataset_name", "children"), Output("upload_status", "children"),
      Output("crypto_advice", "children"), Output("mitigation_table_container", "children"),
-     Output("soc_summary", "children")],
+     Output("soc_summary", "children"), Output("ml-cache", "data"), Output("interval", "disabled")],
     [Input("interval", "n_intervals"), Input("model_selector", "value"),
      Input("crypto_selector", "value"), Input("upload_data", "contents")],
-    [State("event-store", "data"), State("upload_data", "filename")],
+    [State("event-store", "data"), State("upload_data", "filename"), State("ml-cache", "data")],
 )
-def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stored_state, upload_filename):
+def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stored_state, upload_filename, cached_ml_result):
     stored_state = stored_state if isinstance(stored_state, dict) else {}
     events = list(stored_state.get("events", []))
     dataset_name = stored_state.get("dataset_name", "Synthetic event generator")
@@ -431,9 +428,9 @@ def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stor
     if trigger == "upload_data" and upload_contents:
         new_events, message = parse_upload(upload_contents)
         if new_events:
-            events = (events + new_events)[-MAX_EVENTS:]
+            events = new_events[-MAX_EVENTS:]
             dataset_name = upload_filename or "Uploaded CSV"
-            upload_message = message
+            upload_message = message + f" Dashboard loaded {len(events):,} events from this dataset."
         else:
             upload_message = message
     elif trigger == "interval" or trigger is None:
@@ -446,7 +443,8 @@ def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stor
         new_state = {"events": events, "dataset_name": dataset_name, "upload_message": upload_message}
         return (new_state, "Waiting for the first event...", empty, empty, empty, make_risk_gauge(0),
                 f"Dataset: {dataset_name}", upload_message, "No recommendation available yet.",
-                html.Div("Waiting for events..."), html.Div("No event data is available yet."))
+                html.Div("Waiting for events..."), html.Div("No event data is available yet."), cached_ml_result,
+                dataset_name != "Synthetic event generator")
 
     defaults = {"attack_type": "unknown", "risk_score": 0.5, "latency": 150.0,
                 "crypto": "Unknown", "timestamp": "", "source": "Unknown"}
@@ -462,7 +460,10 @@ def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stor
     avg_risk = float(df["risk_score"].mean())
     avg_latency = float(df["latency"].mean())
     high_risk_count = int((df["risk_score"] >= .70).sum())
-    ml_result = evaluate_and_predict(df, model_type)
+    if trigger in ("upload_data", "model_selector") or not isinstance(cached_ml_result, dict):
+        ml_result = evaluate_and_predict(df, model_type)
+    else:
+        ml_result = cached_ml_result
     crypto_label, crypto_reason = crypto_engine(crypto_mode, float(latest["risk_score"]))
 
     advice = html.Div([
@@ -511,7 +512,8 @@ def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stor
     new_state = {"events": df.drop(columns=["event_number"]).to_dict(orient="records"),
                  "dataset_name": dataset_name, "upload_message": upload_message}
     return (new_state, live_feed, make_risk_figure(df), make_latency_figure(df), make_attack_figure(df),
-            make_risk_gauge(avg_risk), f"Dataset: {dataset_name}", status, advice, table, summary)
+            make_risk_gauge(avg_risk), f"Dataset: {dataset_name}", status, advice, table, summary, ml_result,
+            dataset_name != "Synthetic event generator")
 
 
 @app.callback(
