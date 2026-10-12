@@ -354,8 +354,14 @@ app.layout = html.Div(style=STYLE, children=[
             "📁 Upload CSV Dataset", html.Br(), html.Small("Up to 3,000 rows per upload")
         ]), style={"border": "2px dashed #38bdf8", "padding": "20px", "textAlign": "center",
                     "borderRadius": "8px", "cursor": "pointer"}, multiple=False),
-        html.Div(id="dataset_name", style={"marginTop": "10px"}),
-        html.Div(id="upload_status", style={"marginTop": "8px"}),
+        # This filename label updates independently, before CSV parsing finishes.
+        html.Div(id="selected_filename", style={"marginTop": "10px", "fontWeight": "bold", "color": "#7dd3fc"}),
+        html.Div(id="dataset_name", style={"marginTop": "6px"}),
+        dcc.Loading(
+            id="upload-loading",
+            type="circle",
+            children=html.Div(id="upload_status", style={"marginTop": "8px"}),
+        ),
     ]),
     html.Div(style=CARD, children=[
         html.H3("Model and Cryptographic Configuration"),
@@ -389,6 +395,17 @@ app.layout = html.Div(style=STYLE, children=[
         "ML metrics depend on the supplied features and labels. Cryptographic and compliance recommendations "
         "are advisory and do not deploy controls or establish certification.")]),
 ])
+
+
+@app.callback(
+    Output("selected_filename", "children"),
+    Input("upload_data", "filename"),
+)
+def show_selected_filename(filename):
+    """Show the selected filename immediately, without waiting for CSV parsing."""
+    if not filename:
+        return "No dataset selected yet."
+    return f"Selected file: {filename}"
 
 
 @app.callback(
