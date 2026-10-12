@@ -368,10 +368,10 @@ app.layout = html.Div(style=STYLE, children=[
     html.P("Research prototype | Synthetic events and uploaded CSV data | Advisory decision support only",
            style={"textAlign": "center", "color": "#cbd5e1"}),
     # Session storage survives browser refreshes in the same tab. It is not a server-side database.
-    dcc.Store(id="event-store", storage_type="session", data={
+    dcc.Store(id="event-store", storage_type="local", data={
         "events": [], "dataset_name": "Synthetic event generator", "upload_message": ""
     }),
-    dcc.Store(id="ml-cache", storage_type="session", data=None),
+    dcc.Store(id="ml-cache", storage_type="memory", data=None),
     html.Div(style=CARD, children=[
         html.H3("Data Source"),
         dcc.Upload(id="upload_data", children=html.Div([
@@ -424,53 +424,94 @@ app.layout = html.Div(style=STYLE, children=[
     Input("upload_data", "filename"),
 )
 def show_selected_filename(filename):
-    """Show the selected filename immediately, without waiting for CSV parsing."""
+    """Show the selected filename immediately, before parsing completes."""
     if not filename:
-        return "No dataset selected yet."
+        return "No new file selected. The last saved dataset remains loaded if available."
     return f"Selected file: {filename}"
 
 
 @app.callback(
-    [Output("event-store", "data"), Output("live_feed", "children"),
+    Output("event-store", "data"),
+    Output("upload_status", "children"),
+    Output("interval", "disabled"),
+    Input("upload_data", "contents"),
+    Input("interval", "n_intervals"),
+    State("event-store", "data"),
+    State("upload_data", "filename"),
+    prevent_initial_call=False,
+)
+def load_dataset_or_generate_events(upload_contents, n_intervals, stored_state, upload_filename):
+    """Parse each new upload once; persist records in browser local storage.
+
+    Once a dataset is loaded, stop synthetic timer events from replacing it.
+    The parsed records and filename survive a browser refresh in the same browser.
+    """
+    stored_state = stored_state if isinstance(stored_state, dict) else {
+        "events": [], "dataset_name": "Synthetic event generator", "upload_message": ""
+    }
+    trigger = ctx.triggered_id
+    current_name = stored_state.get("dataset_name", "Synthetic event generator")
+
+    if trigger == "upload_data" and upload_contents:
+        events, message = parse_upload(upload_contents)
+        if not events:
+            # Keep the currently loaded data if a new file fails to parse.
+            return dash.no_update, message, current_name != "Synthetic event generator"
+        name = upload_filename or "Uploaded CSV"
+        message = f"Loaded {len(events):,} rows from {name}. {message}"
+        new_state = {
+            "events": events[-MAX_EVENTS:],
+            "dataset_name": name,
+            "upload_message": message,
+            "data_source": "uploaded_csv",
+        }
+        return new_state, message, True
+
+    if current_name != "Synthetic event generator":
+        # A persisted uploaded dataset is already loaded: do not overwrite it.
+        # Restore a visible status after a page refresh as well.
+        restored_status = stored_state.get("upload_message") or f"Restored {current_name} from browser storage."
+        return dash.no_update, restored_status, True
+
+    if trigger == "interval" or trigger is None:
+        events = list(stored_state.get("events", []))
+        events.append(generate_synthetic_event("AUTO"))
+        events = events[-MAX_EVENTS:]
+        new_state = {
+            "events": events,
+            "dataset_name": "Synthetic event generator",
+            "upload_message": "",
+            "data_source": "synthetic",
+        }
+        return new_state, dash.no_update, False
+
+    return dash.no_update, dash.no_update, False
+
+
+@app.callback(
+    [Output("live_feed", "children"),
      Output("risk_graph", "figure"), Output("latency_graph", "figure"),
      Output("soc_attack_stream", "figure"), Output("soc_risk_gauge", "figure"),
-     Output("dataset_name", "children"), Output("upload_status", "children"),
-     Output("crypto_advice", "children"), Output("mitigation_table_container", "children"),
-     Output("soc_summary", "children"), Output("ml-cache", "data"), Output("interval", "disabled"),
-     Output("dataset_preview", "children")],
-    [Input("interval", "n_intervals"), Input("model_selector", "value"),
-     Input("crypto_selector", "value"), Input("upload_data", "contents")],
-    [State("event-store", "data"), State("upload_data", "filename"), State("ml-cache", "data")],
+     Output("dataset_name", "children"), Output("crypto_advice", "children"),
+     Output("mitigation_table_container", "children"), Output("soc_summary", "children"),
+     Output("ml-cache", "data"), Output("dataset_preview", "children")],
+    [Input("event-store", "data"), Input("model_selector", "value"),
+     Input("crypto_selector", "value")],
+    [State("ml-cache", "data")],
 )
-def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stored_state, upload_filename, cached_ml_result):
+def render_dashboard(stored_state, model_type, crypto_mode, cached_ml_result):
+    """Render all charts and summaries automatically when stored data changes."""
     stored_state = stored_state if isinstance(stored_state, dict) else {}
-    events = list(stored_state.get("events", []))
+    events = stored_state.get("events", [])
     dataset_name = stored_state.get("dataset_name", "Synthetic event generator")
-    upload_message = stored_state.get("upload_message", "")
-    trigger = ctx.triggered_id
-
-    # Only parse the file when the upload control changes; timer refreshes
-    # will not append the same CSV repeatedly.
-    if trigger == "upload_data" and upload_contents:
-        new_events, message = parse_upload(upload_contents)
-        if new_events:
-            events = new_events[-MAX_EVENTS:]
-            dataset_name = upload_filename or "Uploaded CSV"
-            upload_message = message + f" Dashboard loaded {len(events):,} events from this dataset."
-        else:
-            upload_message = message
-    elif trigger == "interval" or (trigger is None and dataset_name == "Synthetic event generator"):
-        events.append(generate_synthetic_event(crypto_mode))
-        events = events[-MAX_EVENTS:]
-
     df = pd.DataFrame(events)
+
     if df.empty:
         empty = empty_figure("Waiting for events")
-        new_state = {"events": events, "dataset_name": dataset_name, "upload_message": upload_message}
-        return (new_state, "Waiting for the first event...", empty, empty, empty, make_risk_gauge(0),
-                f"Dataset: {dataset_name}", upload_message, "No recommendation available yet.",
-                html.Div("Waiting for events..."), html.Div("No event data is available yet."), cached_ml_result,
-                dataset_name != "Synthetic event generator", "Upload a CSV to preview its first rows.")
+        return ("Waiting for the first event...", empty, empty, empty, make_risk_gauge(0),
+                f"Dataset: {dataset_name}", "No recommendation available yet.",
+                html.Div("Waiting for events..."), html.Div("No event data is available yet."),
+                None, "Upload a CSV to preview its first rows.")
 
     defaults = {"attack_type": "unknown", "risk_score": 0.5, "latency": 150.0,
                 "crypto": "Unknown", "timestamp": "", "source": "Unknown"}
@@ -486,12 +527,19 @@ def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stor
     avg_risk = float(df["risk_score"].mean())
     avg_latency = float(df["latency"].mean())
     high_risk_count = int((df["risk_score"] >= .70).sum())
-    if trigger in ("upload_data", "model_selector") or not isinstance(cached_ml_result, dict):
-        ml_result = evaluate_and_predict(df, model_type)
-    else:
-        ml_result = cached_ml_result
-    crypto_label, crypto_reason = crypto_engine(crypto_mode, float(latest["risk_score"]))
 
+    # Refit only when the dataset or model choice changes; crypto-mode changes
+    # update the advisory label without retraining the ML model.
+    data_signature = (dataset_name, len(df), str(df["risk_score"].sum()), str(df["latency"].sum()))
+    cached_signature = cached_ml_result.get("signature") if isinstance(cached_ml_result, dict) else None
+    if cached_signature != data_signature or not isinstance(cached_ml_result, dict) or cached_ml_result.get("model_type") != model_type:
+        ml_result = evaluate_and_predict(df, model_type)
+        ml_cache_out = {"signature": data_signature, "model_type": model_type, "result": ml_result}
+    else:
+        ml_result = cached_ml_result.get("result", {"text": "ML analysis unavailable.", "metrics": None})
+        ml_cache_out = cached_ml_result
+
+    crypto_label, crypto_reason = crypto_engine(crypto_mode, float(latest["risk_score"]))
     advice = html.Div([
         html.H4("Cryptographic Decision Support"),
         html.P([html.Strong("Selected mode: "), crypto_mode]),
@@ -521,34 +569,28 @@ def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stor
             {"if": {"filter_query": '{Risk Level} = "High"', "column_id": "Risk Level"}, "backgroundColor": "#9a3412", "color": "white"},
         ],
     )
-
     summary = [html.H3("SOC Operational Summary"),
         html.Div(style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(180px, 1fr))", "gap": "12px"}, children=[
-            html.Div([html.H4("Events retained"), html.H2(str(len(df)))]),
+            html.Div([html.H4("Dataset rows"), html.H2(str(len(df)))]),
             html.Div([html.H4("Mean risk"), html.H2(f"{avg_risk:.3f}")]),
             html.Div([html.H4("High-risk events"), html.H2(str(high_risk_count))]),
             html.Div([html.H4("Mean latency"), html.H2(f"{avg_latency:.1f} ms")]),
         ]), html.Hr(), html.P([html.Strong("ML assessment: "), ml_result["text"]])]
-    if ml_result["metrics"]:
+    if ml_result.get("metrics"):
         m = ml_result["metrics"]
         summary.append(html.P(f"Held-out evaluation: accuracy {m['Accuracy']:.1%}; F1 {m['F1']:.3f}; test rows {m['Test observations']}."))
     summary.append(html.Small("Synthetic-data metrics are not evidence of production detection performance."))
 
-    status = upload_message or "Synthetic event stream active."
-    new_state = {"events": df.drop(columns=["event_number"]).to_dict(orient="records"),
-                 "dataset_name": dataset_name, "upload_message": upload_message}
     preview_df = df.drop(columns=["event_number"], errors="ignore").head(8).copy()
     preview = dash_table.DataTable(
         data=preview_df.to_dict("records"),
         columns=[{"name": str(c), "id": str(c)} for c in preview_df.columns],
-        page_size=8,
-        style_table={"overflowX": "auto"},
+        page_size=8, style_table={"overflowX": "auto"},
         style_header={"backgroundColor": "#1e293b", "color": "white", "fontWeight": "bold"},
         style_cell={"backgroundColor": "#0f172a", "color": "#e2e8f0", "minWidth": "110px", "maxWidth": "240px", "whiteSpace": "normal", "textAlign": "left", "padding": "8px"},
     )
-    return (new_state, live_feed, make_risk_figure(df), make_latency_figure(df), make_attack_figure(df),
-            make_risk_gauge(avg_risk), f"Dataset: {dataset_name}", status, advice, table, summary, ml_result,
-            dataset_name != "Synthetic event generator", preview)
+    return (live_feed, make_risk_figure(df), make_latency_figure(df), make_attack_figure(df),
+            make_risk_gauge(avg_risk), f"Dataset: {dataset_name}", advice, table, summary, ml_cache_out, preview)
 
 
 @app.callback(
