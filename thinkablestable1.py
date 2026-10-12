@@ -8,7 +8,7 @@ import traceback
 from collections import deque
 
 import dash
-from dash import dcc, html, Input, Output, State, dash_table
+from dash import dcc, html, Input, Output, State, dash_table, no_update
 from dash.exceptions import PreventUpdate
 
 import pandas as pd
@@ -27,105 +27,80 @@ except ImportError:
 
 
 # ==========================================================
-# AO-LACCP SOC CONFIGURATION
+# CONFIGURATION
 # ==========================================================
 
 app = dash.Dash(__name__)
 app.title = "AO-LACCP SOC | SIEM-X Engine"
 
-MAX_UPLOAD_MB = 10
-MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_DATASET_ROWS = 3000
 MAX_CHART_ROWS = 500
-MAX_LIVE_ROWS = 200
 
-live_stream = deque(maxlen=MAX_LIVE_ROWS)
+live_stream = deque(maxlen=200)
 stream_lock = threading.Lock()
-state_lock = threading.Lock()
-
-uploaded_df = pd.DataFrame()
-uploaded_dataset_name = "No dataset uploaded"
-upload_status = "Upload a CSV or Excel dataset."
-
-crypto_mode_global = "AUTO"
 
 ATTACK_TYPES = [
-    "brute_force",
-    "MITM",
-    "zero_day",
-    "ransomware",
-    "phishing",
-    "data_exfiltration",
+    "brute_force", "MITM", "zero_day",
+    "ransomware", "phishing", "data_exfiltration"
 ]
 
 MITIGATION_DB = {
-    "brute_force": {
-        "risk": "High",
-        "mitigation": "Rate limiting, behavioral CAPTCHA, AI anomaly detection",
-    },
-    "MITM": {
-        "risk": "Critical",
-        "mitigation": "TLS 1.3 enforcement, certificate pinning, AI traffic inspection",
-    },
-    "zero_day": {
-        "risk": "Critical",
-        "mitigation": "Behavioral analysis, rapid patching, threat hunting",
-    },
-    "ransomware": {
-        "risk": "Critical",
-        "mitigation": "Immutable backups, AI endpoint detection, Zero Trust",
-    },
-    "phishing": {
-        "risk": "High",
-        "mitigation": "AI email filtering, MFA, security awareness training",
-    },
-    "data_exfiltration": {
-        "risk": "High",
-        "mitigation": "DLP, outbound anomaly detection, AI data flow monitoring",
-    },
+    "brute_force": "Rate limiting, behavioral CAPTCHA, AI anomaly detection",
+    "MITM": "TLS 1.3 enforcement, certificate pinning, AI traffic inspection",
+    "zero_day": "Behavioral analysis, rapid patching, threat hunting",
+    "ransomware": "Immutable backups, endpoint detection, Zero Trust",
+    "phishing": "AI email filtering, MFA, security awareness training",
+    "data_exfiltration": "DLP and outbound anomaly detection",
 }
+
+STYLE = {
+    "backgroundColor": "#050914",
+    "color": "#e5e7eb",
+    "fontFamily": "Arial",
+    "minHeight": "100vh",
+    "padding": "16px",
+}
+
+CARD = {
+    "background": "rgba(255,255,255,0.05)",
+    "border": "1px solid rgba(255,255,255,0.12)",
+    "borderRadius": "12px",
+    "padding": "16px",
+    "marginBottom": "14px",
+}
+
+GRAPH_CONFIG = {"displaylogo": False, "responsive": True}
 
 
 # ==========================================================
-# CRYPTOGRAPHIC DECISION ENGINE
+# CRYPTOGRAPHIC ENGINE
 # ==========================================================
 
 def crypto_engine(mode, risk):
     if mode == "PQC":
         return "PQC", 0.10
-
     if mode == "RSA":
         return "RSA", 0.30
-
     if mode == "HYBRID":
-        if risk > 0.60:
-            return "PQC+AES", 0.08
-        return "RSA+AES", 0.20
+        return ("PQC+AES", 0.08) if risk > 0.60 else ("RSA+AES", 0.20)
 
     if risk > 0.75:
         return "PQC-AUTO", 0.10
-
     if risk > 0.45:
         return "RSA-AUTO", 0.30
-
     return "AES-256", 0.05
 
 
 # ==========================================================
-# SYNTHETIC LIVE THREAT STREAM
+# SYNTHETIC LIVE STREAM
 # ==========================================================
 
 def pipeline():
-    global crypto_mode_global
-
     while True:
         risk = random.random()
         latency = random.uniform(50, 400)
-
-        with state_lock:
-            mode = crypto_mode_global
-
-        crypto, penalty = crypto_engine(mode, risk)
+        crypto, penalty = crypto_engine("AUTO", risk)
 
         event = {
             "attack_type": random.choice(ATTACK_TYPES),
@@ -148,106 +123,78 @@ def normalize_dataset(df):
     df = df.copy()
 
     df.columns = [
-        str(column).strip().lower()
-        .replace(" ", "_")
-        .replace("-", "_")
-        for column in df.columns
+        str(c).strip().lower().replace(" ", "_").replace("-", "_")
+        for c in df.columns
     ]
 
     aliases = {
         "attack_type": [
             "attack", "attacktype", "label", "class",
-            "type", "threat", "category", "event_type",
+            "type", "threat", "category", "event_type"
         ],
         "risk_score": [
             "risk", "risk_probability", "risk_prob",
-            "anomaly_score", "threat_score",
+            "anomaly_score", "threat_score"
         ],
         "latency": [
             "response_time", "latency_ms", "delay",
-            "processing_time", "response_latency",
+            "processing_time", "response_latency"
         ],
     }
 
-    for target, candidates in aliases.items():
+    for target, names in aliases.items():
         if target not in df.columns:
-            for candidate in candidates:
-                if candidate in df.columns:
-                    df.rename(
-                        columns={candidate: target},
-                        inplace=True,
-                    )
+            for name in names:
+                if name in df.columns:
+                    df.rename(columns={name: target}, inplace=True)
                     break
 
     notes = []
 
-    # Attack labels
     if "attack_type" not in df.columns:
         df["attack_type"] = "uploaded_event"
         notes.append(
-            "No attack-label column found. Events are labeled "
-            "'uploaded_event'; attack types were not inferred."
+            "No attack label found. Events are labeled uploaded_event."
         )
     else:
         df["attack_type"] = (
-            df["attack_type"]
-            .fillna("unknown")
-            .astype(str)
-            .str.strip()
-            .replace("", "unknown")
+            df["attack_type"].fillna("unknown").astype(str).str.strip()
         )
+        df.loc[df["attack_type"] == "", "attack_type"] = "unknown"
 
-    # Risk scores
     if "risk_score" not in df.columns:
         df["risk_score"] = 0.5
         notes.append(
-            "No risk-score column found. Placeholder risk 0.5 used; "
-            "this is not a measured risk score."
+            "Risk score missing: placeholder 0.5 used, not a measured score."
         )
     else:
-        risk = pd.to_numeric(
-            df["risk_score"],
-            errors="coerce",
-        )
-
+        risk = pd.to_numeric(df["risk_score"], errors="coerce")
         risk = risk.replace([np.inf, -np.inf], np.nan)
-        valid = risk.dropna()
 
+        valid = risk.dropna()
         if not valid.empty and valid.min() >= 0 and valid.max() > 1:
             if valid.max() <= 100:
                 risk = risk / 100.0
-                notes.append(
-                    "Risk values converted from percentages to 0-1."
-                )
+                notes.append("Risk scores converted from percentages.")
             else:
                 risk[:] = np.nan
 
         risk = risk.where(risk.between(0, 1))
-
         if risk.notna().any():
             risk = risk.fillna(risk.median())
         else:
             risk = pd.Series(0.5, index=df.index)
-            notes.append(
-                "Risk values were missing or invalid. Placeholder "
-                "risk 0.5 used."
-            )
+            notes.append("Invalid risk scores replaced with placeholder 0.5.")
 
         df["risk_score"] = risk.astype(float)
 
-    # Latency
     if "latency" not in df.columns:
         df["latency"] = 150.0
         notes.append(
-            "No latency column found. Placeholder latency of "
-            "150 ms used; this is not a measured latency."
+            "Latency missing: placeholder 150 ms used, not a measurement."
         )
     else:
-        latency = pd.to_numeric(
-            df["latency"],
-            errors="coerce",
-        )
-
+        latency = pd.to_numeric(df["latency"], errors="coerce")
         latency = latency.replace([np.inf, -np.inf], np.nan)
         latency = latency.where(latency >= 0)
 
@@ -255,9 +202,7 @@ def normalize_dataset(df):
             latency = latency.fillna(latency.median())
         else:
             latency = pd.Series(150.0, index=df.index)
-            notes.append(
-                "Latency values were invalid. Placeholder 150 ms used."
-            )
+            notes.append("Invalid latency replaced with placeholder 150 ms.")
 
         df["latency"] = latency.astype(float)
 
@@ -265,86 +210,59 @@ def normalize_dataset(df):
 
 
 # ==========================================================
-# CSV AND EXCEL UPLOAD
+# FILE UPLOAD PARSER
 # ==========================================================
 
 def parse_upload(contents, filename):
-    if not contents:
-        raise ValueError("No file was received.")
-
-    if not filename:
-        raise ValueError("The filename is missing.")
+    if not contents or not filename:
+        raise ValueError("Select a dataset first.")
 
     extension = filename.lower().rsplit(".", 1)[-1]
-
     if extension not in ("csv", "xlsx", "xls"):
-        raise ValueError(
-            "Unsupported file. Please upload CSV, XLSX, or XLS."
-        )
-
-    # Approximate encoded size check before decoding.
-    estimated_size = len(contents) * 3 // 4
-
-    if estimated_size > MAX_UPLOAD_BYTES:
-        raise ValueError(
-            f"File exceeds the {MAX_UPLOAD_MB} MB upload limit. "
-            "Reduce its size and try again."
-        )
+        raise ValueError("Supported formats: CSV, XLSX, XLS.")
 
     try:
         _, encoded = contents.split(",", 1)
         raw = base64.b64decode(encoded, validate=True)
     except Exception as exc:
-        raise ValueError(
-            "The file could not be decoded. Try saving it again."
-        ) from exc
+        raise ValueError("The uploaded file could not be decoded.") from exc
 
     if len(raw) > MAX_UPLOAD_BYTES:
-        raise ValueError(
-            f"File exceeds the {MAX_UPLOAD_MB} MB upload limit."
-        )
+        raise ValueError("File exceeds the 10 MB upload limit.")
 
     if not raw:
-        raise ValueError("The uploaded file is empty.")
+        raise ValueError("The file is empty.")
 
     try:
         if extension == "csv":
             df = pd.read_csv(
                 io.BytesIO(raw),
+                nrows=MAX_DATASET_ROWS + 1
+            )
+        elif extension == "xlsx":
+            df = pd.read_excel(
+                io.BytesIO(raw),
                 nrows=MAX_DATASET_ROWS + 1,
-                low_memory=True,
+                engine="openpyxl"
             )
         else:
             df = pd.read_excel(
                 io.BytesIO(raw),
-                nrows=MAX_DATASET_ROWS + 1,
-                engine="openpyxl" if extension == "xlsx" else None,
+                nrows=MAX_DATASET_ROWS + 1
             )
-
-    except ImportError as exc:
-        raise ValueError(
-            "An Excel reader is missing. Install openpyxl for XLSX "
-            "or xlrd for older XLS files."
-        ) from exc
-
     except Exception as exc:
         raise ValueError(
-            "Could not read the file. Check that it is a valid CSV "
-            "or Excel file and is not corrupted."
+            "Could not read this file. Check its format and install "
+            "the required Excel reader if needed."
         ) from exc
 
     if df.empty:
-        raise ValueError(
-            "No data rows were found in the uploaded file."
-        )
+        raise ValueError("The dataset contains no data rows.")
 
     notes = []
-
     if len(df) > MAX_DATASET_ROWS:
         df = df.iloc[:MAX_DATASET_ROWS].copy()
-        notes.append(
-            f"Dataset limited to the first {MAX_DATASET_ROWS:,} rows."
-        )
+        notes.append(f"Limited to {MAX_DATASET_ROWS:,} rows.")
 
     df, normalization_notes = normalize_dataset(df)
     notes.extend(normalization_notes)
@@ -353,7 +271,7 @@ def parse_upload(contents, filename):
 
 
 # ==========================================================
-# MITIGATION RECOMMENDATIONS
+# MITIGATION TABLE
 # ==========================================================
 
 def generate_mitigation_table(df):
@@ -361,7 +279,7 @@ def generate_mitigation_table(df):
         return []
 
     grouped = (
-        df.groupby("attack_type", dropna=False)["risk_score"]
+        df.groupby("attack_type")["risk_score"]
         .agg(["mean", "count"])
         .reset_index()
     )
@@ -372,97 +290,60 @@ def generate_mitigation_table(df):
         attack = str(row["attack_type"])
         risk = float(row["mean"])
 
-        info = MITIGATION_DB.get(attack, {})
-
         if risk >= 0.70:
-            risk_level = "Critical"
+            level = "Critical"
         elif risk >= 0.50:
-            risk_level = "High"
+            level = "High"
         elif risk >= 0.30:
-            risk_level = "Moderate"
+            level = "Moderate"
         else:
-            risk_level = "Low"
+            level = "Low"
 
         results.append({
             "Threat": attack.replace("_", " ").title(),
-            "Avg Risk Score": round(risk, 3),
-            "Risk Level": info.get("risk", risk_level),
+            "Average Risk": round(risk, 3),
+            "Risk Level": level,
             "Occurrences": int(row["count"]),
-            "Potential Impact": (
-                f"Potential impact from {attack.replace('_', ' ')}"
-            ),
-            "Latency Impact": "Requires measurement",
-            "Cryptographic Concern": (
-                "Review applicable encryption exposure"
-            ),
-            "AI/ML Relevance": "Requires validation",
-            "Recommended Mitigation": info.get(
-                "mitigation",
-                f"Investigate and validate {attack.replace('_', ' ')} events",
+            "Recommended Mitigation": MITIGATION_DB.get(
+                attack, "Investigate the event and validate appropriate controls."
             ),
         })
 
     return sorted(
         results,
-        key=lambda item: item["Avg Risk Score"],
-        reverse=True,
+        key=lambda x: x["Average Risk"],
+        reverse=True
     )
 
 
 # ==========================================================
-# STYLING
-# ==========================================================
-
-STYLE = {
-    "backgroundColor": "#050914",
-    "color": "#e5e7eb",
-    "fontFamily": "Arial",
-    "minHeight": "100vh",
-    "padding": "16px",
-}
-
-CARD = {
-    "background": "rgba(255,255,255,0.05)",
-    "border": "1px solid rgba(255,255,255,0.08)",
-    "borderRadius": "14px",
-    "padding": "14px",
-    "marginBottom": "12px",
-}
-
-GRAPH_CONFIG = {
-    "displaylogo": False,
-    "responsive": True,
-}
-
-
-# ==========================================================
-# DASHBOARD LAYOUT
+# LAYOUT
 # ==========================================================
 
 app.layout = html.Div(style=STYLE, children=[
     html.H1(
         "AO-LACCP SOC Intelligence Platform",
-        style={
-            "textAlign": "center",
-            "color": "#38bdf8",
-        },
+        style={"textAlign": "center", "color": "#38bdf8"}
     ),
 
+    # Critical: stores uploaded records for the graph callback.
+    dcc.Store(id="dataset_store", storage_type="memory"),
+
     html.Div(style=CARD, children=[
-        html.H3("Dataset Upload"),
+        html.H3("Upload Dataset"),
 
         dcc.Upload(
             id="upload_data",
             children=html.Div([
-                "Select or drag a CSV / Excel dataset here",
+                "📁 Select or drag a CSV / Excel dataset here",
                 html.Br(),
-                html.Small("Maximum upload size: 10 MB"),
+                html.Small("Maximum size: 10 MB; maximum rows: 3,000")
             ]),
             accept=".csv,.xlsx,.xls",
             multiple=False,
             style={
                 "border": "2px dashed #38bdf8",
-                "padding": "22px",
+                "padding": "24px",
                 "textAlign": "center",
                 "cursor": "pointer",
                 "borderRadius": "10px",
@@ -471,230 +352,162 @@ app.layout = html.Div(style=STYLE, children=[
 
         html.Div(
             id="dataset_name",
-            children=upload_status,
-            style={
-                "marginTop": "12px",
-                "whiteSpace": "pre-wrap",
-            },
+            style={"marginTop": "12px", "whiteSpace": "pre-wrap"}
         ),
 
         html.Div(
             style={
                 "display": "flex",
-                "gap": "15px",
-                "marginTop": "15px",
+                "gap": "14px",
                 "flexWrap": "wrap",
+                "marginTop": "16px",
             },
             children=[
-                html.Div(
-                    style={"flex": "1", "minWidth": "200px"},
-                    children=[
-                        html.Label("Machine Learning Model"),
-                        dcc.Dropdown(
-                            id="model_selector",
-                            options=[
-                                {
-                                    "label": "Random Forest",
-                                    "value": "RF",
-                                },
-                                {
-                                    "label": "XGBoost",
-                                    "value": "XGB",
-                                    "disabled": not XGB_AVAILABLE,
-                                },
-                            ],
-                            value="RF",
-                            clearable=False,
-                        ),
-                    ],
-                ),
-
-                html.Div(
-                    style={"flex": "1", "minWidth": "200px"},
-                    children=[
-                        html.Label("Cryptographic Mode"),
-                        dcc.Dropdown(
-                            id="crypto_selector",
-                            options=[
-                                {"label": "Auto", "value": "AUTO"},
-                                {"label": "PQC", "value": "PQC"},
-                                {"label": "RSA", "value": "RSA"},
-                                {"label": "Hybrid", "value": "HYBRID"},
-                            ],
-                            value="AUTO",
-                            clearable=False,
-                        ),
-                    ],
-                ),
-            ],
+                html.Div(style={"flex": "1", "minWidth": "200px"}, children=[
+                    html.Label("ML Model"),
+                    dcc.Dropdown(
+                        id="model_selector",
+                        options=[
+                            {"label": "Random Forest", "value": "RF"},
+                            {
+                                "label": "XGBoost",
+                                "value": "XGB",
+                                "disabled": not XGB_AVAILABLE
+                            }
+                        ],
+                        value="RF",
+                        clearable=False
+                    )
+                ]),
+                html.Div(style={"flex": "1", "minWidth": "200px"}, children=[
+                    html.Label("Cryptographic Mode"),
+                    dcc.Dropdown(
+                        id="crypto_selector",
+                        options=[
+                            {"label": "Auto", "value": "AUTO"},
+                            {"label": "PQC", "value": "PQC"},
+                            {"label": "RSA", "value": "RSA"},
+                            {"label": "Hybrid", "value": "HYBRID"}
+                        ],
+                        value="AUTO",
+                        clearable=False
+                    )
+                ])
+            ]
         ),
-
-        html.Div(
-            id="crypto_advice",
-            style={"marginTop": "12px"},
-        ),
+        html.Div(id="crypto_advice", style={"marginTop": "12px"})
     ]),
 
     html.Div(style=CARD, children=[
-        html.H3("Live Threat Stream"),
-        html.Div(id="live_feed"),
+        html.H3("Threat Stream"),
+        html.Div(id="live_feed")
     ]),
 
     html.Div(
         style={
             "display": "grid",
-            "gridTemplateColumns": (
-                "repeat(auto-fit, minmax(300px, 1fr))"
-            ),
-            "gap": "16px",
+            "gridTemplateColumns": "repeat(auto-fit, minmax(300px, 1fr))",
+            "gap": "14px"
         },
         children=[
-            dcc.Graph(
-                id="risk_graph",
-                config=GRAPH_CONFIG,
-            ),
-            dcc.Graph(
-                id="latency_graph",
-                config=GRAPH_CONFIG,
-            ),
-        ],
+            dcc.Graph(id="risk_graph", config=GRAPH_CONFIG),
+            dcc.Graph(id="latency_graph", config=GRAPH_CONFIG),
+        ]
     ),
 
     html.Div(
         style={
             "display": "grid",
-            "gridTemplateColumns": (
-                "repeat(auto-fit, minmax(300px, 1fr))"
-            ),
-            "gap": "16px",
+            "gridTemplateColumns": "repeat(auto-fit, minmax(300px, 1fr))",
+            "gap": "14px"
         },
         children=[
-            dcc.Graph(
-                id="soc_attack_stream",
-                config=GRAPH_CONFIG,
-            ),
-            dcc.Graph(
-                id="soc_risk_gauge",
-                config=GRAPH_CONFIG,
-            ),
-        ],
+            dcc.Graph(id="soc_attack_stream", config=GRAPH_CONFIG),
+            dcc.Graph(id="soc_risk_gauge", config=GRAPH_CONFIG),
+        ]
     ),
 
     html.Div(id="soc_summary", style=CARD),
 
     html.Div(style=CARD, children=[
         html.H3("SOC Mitigation & Action Plan"),
-
-        html.Button(
-            "Export as CSV",
-            id="export-btn",
-            n_clicks=0,
-            style={"marginBottom": "10px"},
-        ),
-
+        html.Button("Export as CSV", id="export-btn", n_clicks=0),
         html.Div(
             id="mitigation_table_container",
-            style={"overflowX": "auto"},
-        ),
+            style={"overflowX": "auto", "marginTop": "12px"}
+        )
     ]),
 
     dcc.Download(id="download-mitigation"),
-
-    dcc.Interval(
-        id="interval",
-        interval=2500,
-        n_intervals=0,
-    ),
+    dcc.Interval(id="interval", interval=2500, n_intervals=0),
 ])
 
 
 # ==========================================================
-# DATASET UPLOAD CALLBACK
-# The upload is processed only when a file is selected.
+# UPLOAD CALLBACK
+# This stores the uploaded dataset and triggers the graphs.
 # ==========================================================
 
 @app.callback(
+    Output("dataset_store", "data"),
     Output("dataset_name", "children"),
     Input("upload_data", "contents"),
     State("upload_data", "filename"),
     prevent_initial_call=True,
 )
 def handle_upload(contents, filename):
-    global uploaded_df
-    global uploaded_dataset_name
-    global upload_status
-
     if not contents:
         raise PreventUpdate
 
     try:
         df, notes = parse_upload(contents, filename)
 
-        with state_lock:
-            uploaded_df = df
-            uploaded_dataset_name = filename or "Uploaded dataset"
+        # JSON-compatible records are stored in the browser session.
+        records = df.to_dict("records")
 
         message = (
-            f"Upload successful: {uploaded_dataset_name}\n"
+            f"UPLOAD SUCCESSFUL: {filename}\n"
             f"Rows loaded: {len(df):,}\n"
-            f"Columns: {len(df.columns)}"
+            f"Columns: {len(df.columns)}\n"
+            f"Detected columns: {', '.join(df.columns.astype(str))}"
         )
 
         if notes:
             message += "\n\nNotes:\n- " + "\n- ".join(notes)
 
-        upload_status = message
-        print(message)
-
-        return message
+        return records, message
 
     except Exception as exc:
-        with state_lock:
-            uploaded_df = pd.DataFrame()
-            uploaded_dataset_name = "Upload failed"
-
-        upload_status = f"Upload failed: {exc}"
-        print(upload_status)
         traceback.print_exc()
-
-        return upload_status
+        return no_update, f"UPLOAD FAILED: {exc}"
 
 
 # ==========================================================
-# MACHINE LEARNING
+# ML PREDICTION
 # ==========================================================
 
 def predict_risk(df, model_type):
     if len(df) < 20:
-        return (
-            "ML prediction unavailable: at least 20 rows are recommended."
-        )
+        return "ML prediction unavailable: at least 20 rows recommended."
 
-    # This demonstration target is derived from risk_score.
-    # It is not an independently verified attack label.
     y = (df["risk_score"] > 0.65).astype(int)
 
     if y.nunique() < 2:
-        return (
-            "ML prediction unavailable: only one risk class is present."
-        )
+        return "ML prediction unavailable: only one risk class is present."
 
     try:
         try:
             encoder = OneHotEncoder(
                 handle_unknown="ignore",
-                sparse_output=False,
+                sparse_output=False
             )
         except TypeError:
-            # Compatibility with older scikit-learn releases.
             encoder = OneHotEncoder(
                 handle_unknown="ignore",
-                sparse=False,
+                sparse=False
             )
 
-        X = encoder.fit_transform(
-            df[["attack_type"]].astype(str)
-        )
+        X = encoder.fit_transform(df[["attack_type"]].astype(str))
 
         if model_type == "XGB" and XGB_AVAILABLE:
             model = XGBClassifier(
@@ -703,7 +516,7 @@ def predict_risk(df, model_type):
                 random_state=42,
                 verbosity=0,
                 n_jobs=1,
-                eval_metric="logloss",
+                eval_metric="logloss"
             )
             model_name = "XGBoost"
         else:
@@ -711,128 +524,120 @@ def predict_risk(df, model_type):
                 n_estimators=40,
                 max_depth=8,
                 random_state=42,
-                n_jobs=1,
+                n_jobs=1
             )
             model_name = "Random Forest"
 
         model.fit(X[:-1], y.iloc[:-1])
-
         classes = list(model.classes_)
 
-        if 1 not in classes:
-            probability = 0.0
-        else:
-            probability = float(
-                model.predict_proba(X[-1:])[0][classes.index(1)]
-            )
-
-        prediction = (
-            "HIGH RISK" if probability > 0.5 else "LOW RISK"
+        probability = (
+            float(model.predict_proba(X[-1:])[0][classes.index(1)])
+            if 1 in classes else 0.0
         )
 
-        return (
-            f"{model_name}: {prediction} "
-            f"(estimated probability {probability:.1%})"
-        )
+        label = "HIGH RISK" if probability > 0.5 else "LOW RISK"
+
+        return f"{model_name}: {label} ({probability:.1%})"
 
     except Exception as exc:
-        print(f"ML prediction error: {exc}")
-        traceback.print_exc()
-        return "ML prediction unavailable. See Python terminal."
+        print("ML prediction error:", exc)
+        return "ML prediction unavailable; see Python terminal."
 
 
 # ==========================================================
-# DASHBOARD REFRESH CALLBACK
+# GRAPH CALLBACK
+# Reads the dataset from dataset_store.
+# Uploading a dataset directly triggers this callback.
 # ==========================================================
 
 @app.callback(
-    [
-        Output("live_feed", "children"),
-        Output("risk_graph", "figure"),
-        Output("latency_graph", "figure"),
-        Output("soc_attack_stream", "figure"),
-        Output("soc_risk_gauge", "figure"),
-        Output("crypto_advice", "children"),
-        Output("soc_summary", "children"),
-        Output("mitigation_table_container", "children"),
-    ],
-    [
-        Input("interval", "n_intervals"),
-        Input("model_selector", "value"),
-        Input("crypto_selector", "value"),
-        Input("upload_data", "contents"),
-    ],
+    Output("live_feed", "children"),
+    Output("risk_graph", "figure"),
+    Output("latency_graph", "figure"),
+    Output("soc_attack_stream", "figure"),
+    Output("soc_risk_gauge", "figure"),
+    Output("crypto_advice", "children"),
+    Output("soc_summary", "children"),
+    Output("mitigation_table_container", "children"),
+
+    Input("interval", "n_intervals"),
+    Input("dataset_store", "data"),
+    Input("model_selector", "value"),
+    Input("crypto_selector", "value"),
 )
-def update_dashboard(n, model_type, crypto_mode, upload_contents):
-    global crypto_mode_global
+def update_dashboard(n, stored_data, model_type, crypto_mode):
 
-    with state_lock:
-        crypto_mode_global = crypto_mode
-        dataset = uploaded_df.copy()
-        dataset_name = uploaded_dataset_name
-
-    with stream_lock:
-        live_df = pd.DataFrame(list(live_stream))
-
-    if not dataset.empty:
-        analysis_df = dataset
-        source_name = dataset_name
-        source_type = "Uploaded dataset"
+    # Uploaded dataset takes priority over generated events.
+    if stored_data:
+        df = pd.DataFrame(stored_data)
+        source_name = "Uploaded dataset"
+        source_type = "User-provided data"
     else:
-        analysis_df = live_df
-        source_name = "Generated demonstration stream"
-        source_type = "Synthetic demonstration data"
+        with stream_lock:
+            df = pd.DataFrame(list(live_stream))
 
-    if analysis_df.empty:
-        empty = go.Figure()
-        empty.update_layout(template="plotly_dark")
+        source_name = "Synthetic demonstration stream"
+        source_type = "Generated demonstration data"
 
+    empty = go.Figure()
+    empty.update_layout(template="plotly_dark")
+
+    if df.empty:
         return (
-            "Initializing live stream...",
-            empty,
-            empty,
-            empty,
-            empty,
             "Waiting for data...",
-            "Waiting for dataset or live events...",
-            html.Div("No data available."),
+            empty, empty, empty, empty,
+            "No data available.",
+            "Upload a dataset to display the analysis.",
+            html.Div("No data available.")
         )
 
-    # Limit the number of points sent to the browser.
-    chart_df = analysis_df.tail(MAX_CHART_ROWS).copy()
+    # Ensure numerical types after reading records from dcc.Store.
+    df["risk_score"] = pd.to_numeric(
+        df["risk_score"], errors="coerce"
+    ).fillna(0.5).clip(0, 1)
 
-    avg_risk = float(analysis_df["risk_score"].mean())
-    avg_latency = float(analysis_df["latency"].mean())
+    df["latency"] = pd.to_numeric(
+        df["latency"], errors="coerce"
+    ).fillna(150).clip(lower=0)
 
-    ml_text = predict_risk(analysis_df, model_type)
+    df["attack_type"] = (
+        df["attack_type"].fillna("unknown").astype(str)
+    )
 
-    # Risk chart
+    chart_df = df.tail(MAX_CHART_ROWS).copy()
+
+    avg_risk = float(df["risk_score"].mean())
+    avg_latency = float(df["latency"].mean())
+
+    # 1. Risk score graph
     risk_fig = px.line(
         chart_df,
+        x=chart_df.index,
         y="risk_score",
-        title="Risk Score",
-        render_mode="webgl",
+        title="Risk Score Across Dataset Records",
+        labels={"x": "Record", "risk_score": "Risk Score"},
     )
     risk_fig.update_layout(
         template="plotly_dark",
-        height=340,
-        margin=dict(l=35, r=20, t=55, b=35),
+        height=350,
+        yaxis_range=[0, 1],
     )
 
-    # Latency chart
+    # 2. Latency graph
     latency_fig = px.line(
         chart_df,
+        x=chart_df.index,
         y="latency",
-        title="Latency (ms)",
-        render_mode="webgl",
+        title="Latency Across Dataset Records",
+        labels={"x": "Record", "latency": "Latency (ms)"},
     )
     latency_fig.update_layout(
         template="plotly_dark",
-        height=340,
-        margin=dict(l=35, r=20, t=55, b=35),
+        height=350,
     )
 
-    # Attack count chart
+    # 3. Attack-count graph
     attack_counts = (
         chart_df["attack_type"]
         .value_counts()
@@ -844,74 +649,85 @@ def update_dashboard(n, model_type, crypto_mode, upload_contents):
         attack_counts,
         x="attack_type",
         y="count",
-        title="Event Counts by Label",
+        color="attack_type",
+        title="Event Counts by Attack Label",
+        labels={
+            "attack_type": "Attack Label",
+            "count": "Number of Records",
+        },
     )
     attack_fig.update_layout(
         template="plotly_dark",
         height=380,
-        margin=dict(l=35, r=20, t=55, b=80),
+        showlegend=False,
     )
 
-    # Risk gauge
-    gauge = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=avg_risk,
-            title={"text": "Average Risk Score"},
-            number={"valueformat": ".3f"},
-            gauge={
-                "axis": {"range": [0, 1]},
-                "steps": [
-                    {"range": [0, 0.35], "color": "#16a34a"},
-                    {"range": [0.35, 0.70], "color": "#facc15"},
-                    {"range": [0.70, 1.0], "color": "#ef4444"},
-                ],
-            },
-        )
-    )
+    # 4. Risk gauge
+    gauge = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=avg_risk,
+        title={"text": "Average Dataset Risk"},
+        number={"valueformat": ".3f"},
+        gauge={
+            "axis": {"range": [0, 1]},
+            "steps": [
+                {"range": [0, 0.35], "color": "#16a34a"},
+                {"range": [0.35, 0.70], "color": "#facc15"},
+                {"range": [0.70, 1], "color": "#ef4444"},
+            ],
+        },
+    ))
     gauge.update_layout(
         template="plotly_dark",
         height=380,
-        margin=dict(l=25, r=25, t=65, b=25),
     )
 
-    # Advisory text
+    # Advice
     if avg_risk > 0.70:
         advice = (
-            "Elevated average risk: review PQC readiness and "
-            "validate mitigation actions."
+            "Elevated average risk: review mitigations and "
+            "cryptographic readiness."
         )
     elif avg_risk > 0.50:
         advice = (
-            "Moderate-to-high average risk: evaluate hybrid "
-            "cryptographic controls."
+            "Moderate-to-high average risk: investigate events "
+            "and evaluate applicable controls."
         )
     else:
         advice = (
             "Lower average risk observed. Continue monitoring "
-            "and validate against actual threat labels."
+            "and validate risk-score provenance."
         )
 
-    # Latest synthetic event
-    if live_df.empty:
-        feed_text = "No live events generated yet."
-    else:
-        latest = live_df.iloc[-1]
-        feed_text = (
-            f"Latest simulated event: {latest['attack_type'].upper()} | "
-            f"{latest['crypto']} | "
-            f"Risk: {latest['risk_score']:.3f} | "
-            f"Latency: {latest['latency']:.1f} ms | {ml_text}"
-        )
+    # ML model
+    ml_text = predict_risk(df, model_type)
+
+    feed = html.Div([
+        html.P(f"Data source: {source_name}"),
+        html.P(f"Records analyzed: {len(df):,}"),
+        html.P(ml_text),
+    ])
+
+    # Summary
+    summary = html.Div([
+        html.H3("AO-LACCP SOC Summary"),
+        html.P(f"Source: {source_type}"),
+        html.P(f"Rows analyzed: {len(df):,}"),
+        html.P(f"Average risk score: {avg_risk:.3f}"),
+        html.P(f"Average latency: {avg_latency:.2f} ms"),
+        html.P(
+            "Placeholder values and synthetic events are not "
+            "empirical measurements. Validate dataset labels and "
+            "risk-score methodology before interpreting results."
+        ),
+    ])
 
     # Mitigation table
-    table_data = generate_mitigation_table(analysis_df)
+    table_data = generate_mitigation_table(df)
 
     columns = [
-        {"name": column, "id": column}
-        for column in (
-            list(table_data[0].keys()) if table_data else []
-        )
+        {"name": col, "id": col}
+        for col in (list(table_data[0].keys()) if table_data else [])
     ]
 
     table = dash_table.DataTable(
@@ -926,7 +742,7 @@ def update_dashboard(n, model_type, crypto_mode, upload_contents):
             "whiteSpace": "normal",
             "height": "auto",
             "minWidth": "100px",
-            "maxWidth": "280px",
+            "maxWidth": "300px",
             "textAlign": "left",
             "padding": "8px",
         },
@@ -937,22 +753,8 @@ def update_dashboard(n, model_type, crypto_mode, upload_contents):
         },
     )
 
-    summary = html.Div([
-        html.H3("AO-LACCP SOC Summary"),
-        html.P(f"Data source: {source_name}"),
-        html.P(f"Source type: {source_type}"),
-        html.P(f"Rows analyzed: {len(analysis_df):,}"),
-        html.P(f"Average risk score: {avg_risk:.3f}"),
-        html.P(f"Average latency: {avg_latency:.2f} ms"),
-        html.P(
-            "Research note: synthetic live events and placeholder "
-            "values are not measured security outcomes. Validate "
-            "the uploaded dataset's labels and scoring methodology."
-        ),
-    ])
-
     return (
-        feed_text,
+        feed,
         risk_fig,
         latency_fig,
         attack_fig,
@@ -964,35 +766,32 @@ def update_dashboard(n, model_type, crypto_mode, upload_contents):
 
 
 # ==========================================================
-# EXPORT MITIGATION TABLE
+# EXPORT MITIGATION PLAN
 # ==========================================================
 
 @app.callback(
     Output("download-mitigation", "data"),
     Input("export-btn", "n_clicks"),
+    State("dataset_store", "data"),
     prevent_initial_call=True,
 )
-def export_mitigation(n_clicks):
+def export_mitigation(n_clicks, stored_data):
     if not n_clicks:
         raise PreventUpdate
 
-    with state_lock:
-        df = uploaded_df.copy()
-
-    if df.empty:
+    if stored_data:
+        df = pd.DataFrame(stored_data)
+    else:
         with stream_lock:
             df = pd.DataFrame(list(live_stream))
 
     if df.empty:
         raise PreventUpdate
 
-    table_data = generate_mitigation_table(df)
-
-    if not table_data:
-        raise PreventUpdate
+    data = generate_mitigation_table(df)
 
     return dcc.send_data_frame(
-        pd.DataFrame(table_data).to_csv,
+        pd.DataFrame(data).to_csv,
         "AO-LACCP_Mitigation_Plan.csv",
         index=False,
     )
@@ -1009,14 +808,12 @@ if __name__ == "__main__":
         name="AO-LACCP-Live-Stream",
     ).start()
 
-    print("=" * 55)
-    print("AO-LACCP SOC Intelligence Platform")
-    print("CSV / Excel uploads enabled")
-    print(f"Maximum upload: {MAX_UPLOAD_MB} MB")
-    print(f"Maximum dataset rows: {MAX_DATASET_ROWS}")
-    print(f"XGBoost available: {XGB_AVAILABLE}")
-    print("Open: http://127.0.0.1:8050")
-    print("=" * 55)
+    print("AO-LACCP SOC started.")
+    print("CSV/XLSX/XLS uploads enabled.")
+    print("Maximum upload size: 10 MB")
+    print("Maximum dataset rows: 3,000")
+    print("XGBoost available:", XGB_AVAILABLE)
+    print("Open http://127.0.0.1:8050")
 
     app.run(
         debug=False,
