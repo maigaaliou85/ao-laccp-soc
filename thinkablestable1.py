@@ -11,7 +11,7 @@ from dash import dcc, html, Input, Output, State, dash_table
 
 
 # ==========================================================
-# AO-LACCP SOC | Uploaded Attack Types Only
+# AO-LACCP SOC | Uploaded Dataset Attack Analysis
 # ==========================================================
 
 app = dash.Dash(__name__)
@@ -36,122 +36,157 @@ CARD = {
     "marginBottom": "16px",
 }
 
+# These are candidate column names, not invented attack categories.
+ATTACK_COLUMN_HINTS = {
+    "attack",
+    "attacks",
+    "attacktype",
+    "attacktypes",
+    "attackname",
+    "threat",
+    "threattype",
+    "threatname",
+    "category",
+    "traffic",
+    "traffictype",
+    "label",
+    "class",
+    "target",
+    "eventtype",
+    "eventname",
+    "type",
+}
+
 
 # ==========================================================
-# File upload and Attack Type detection
+# Dataset loading
 # ==========================================================
 
-def normalize_column_name(name):
-    """Normalize column names for matching."""
-    return re.sub(r"[^a-z0-9]", "", str(name).strip().lower())
+def normalize_name(value):
+    return re.sub(r"[^a-z0-9]", "", str(value).strip().lower())
 
 
-def find_attack_type_column(df):
-    """Find an existing Attack Type column without creating one."""
-    accepted_names = {
-        "attacktype",
-        "attacktypes",
-        "attack",
-        "threattype",
-        "threatcategory",
-    }
-
-    for column in df.columns:
-        if normalize_column_name(column) in accepted_names:
-            return column
-
-    return None
-
-
-def parse_upload(contents, filename):
-    """
-    Read CSV or Excel data.
-    Return ONLY the existing Attack Type column.
-    Do not generate attacks or fabricate missing values.
-    """
+def read_dataset(contents, filename):
+    """Read a CSV or Excel dataset without generating data."""
     if not contents:
         return None, "Please upload a dataset."
 
     try:
-        _, content_string = contents.split(",", 1)
-        decoded = base64.b64decode(content_string)
+        _, encoded = contents.split(",", 1)
+        raw = base64.b64decode(encoded)
 
-        if len(decoded) > MAX_FILE_SIZE:
-            return None, "File exceeds the 5 MB upload limit."
+        if len(raw) > MAX_FILE_SIZE:
+            return None, "The file exceeds the 5 MB upload limit."
 
-        file_name = (filename or "").lower()
+        name = (filename or "").lower()
 
-        if file_name.endswith(".csv"):
-            df = pd.read_csv(
-                io.BytesIO(decoded),
-                nrows=MAX_ROWS + 1,
-            )
-        elif file_name.endswith((".xlsx", ".xlsm")):
+        if name.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(raw), nrows=MAX_ROWS + 1)
+        elif name.endswith((".xlsx", ".xlsm")):
             df = pd.read_excel(
-                io.BytesIO(decoded),
+                io.BytesIO(raw),
                 nrows=MAX_ROWS + 1,
                 engine="openpyxl",
             )
         else:
-            return None, (
-                "Unsupported file format. Upload a CSV, XLSX, or XLSM file."
-            )
+            return None, "Upload a CSV, XLSX, or XLSM file."
 
         if df.empty:
-            return None, "The uploaded dataset is empty."
+            return None, "The uploaded dataset contains no rows."
 
-        attack_column = find_attack_type_column(df)
+        # Avoid treating completely empty columns as useful fields.
+        df = df.dropna(axis=1, how="all")
 
-        if attack_column is None:
-            available_columns = ", ".join(map(str, df.columns))
-            return None, (
-                "The uploaded dataset has no recognized Attack Type column. "
-                f"Available columns: {available_columns}"
-            )
+        if df.empty or len(df.columns) == 0:
+            return None, "No usable columns were found."
 
-        # Retain only the existing attack-type data.
-        attack_df = df[[attack_column]].copy()
-        attack_df.columns = ["Attack Type"]
+        # Convert data into browser-safe scalar values.
+        df = df.astype(object).where(pd.notna(df), None)
 
-        # Remove blank values without inventing replacements.
-        attack_df["Attack Type"] = (
-            attack_df["Attack Type"]
-            .astype("string")
-            .str.strip()
-        )
+        note = f"Loaded {filename or 'dataset'}."
+        if len(df) > MAX_ROWS:
+            note += f" Only the first {MAX_ROWS:,} rows were read."
 
-        attack_df = attack_df[
-            attack_df["Attack Type"].notna()
-            & attack_df["Attack Type"].ne("")
-        ]
-
-        if attack_df.empty:
-            return None, "No non-empty Attack Type values were found."
-
-        original_rows = len(df)
-        valid_rows = len(attack_df)
-
-        message = (
-            f"Loaded {filename or 'dataset'} — "
-            f"{valid_rows:,} non-empty Attack Type rows."
-        )
-
-        if original_rows > MAX_ROWS:
-            message += f" Read limited to the first {MAX_ROWS:,} rows."
-
-        return attack_df.reset_index(drop=True), message
+        return df, note
 
     except Exception as exc:
-        return None, f"Unable to read the uploaded file: {exc}"
+        return None, f"Unable to read the file: {exc}"
 
 
 # ==========================================================
-# Graph helpers
+# Suggest columns likely to contain attack categories
 # ==========================================================
 
-def empty_figure(message):
+def suggest_attack_columns(df):
+    """
+    Rank likely category/attack columns using their column names.
+    Do not assume a specific name is guaranteed to be correct.
+    """
+    candidates = []
+
+    for column in df.columns:
+        normalized = normalize_name(column)
+
+        if normalized in ATTACK_COLUMN_HINTS:
+            candidates.append(str(column))
+
+    # If no likely name exists, offer columns containing text or
+    # a manageable number of distinct values for manual selection.
+    if not candidates:
+        for column in df.columns:
+            series = df[column].dropna()
+
+            if series.empty:
+                continue
+
+            unique_count = series.nunique()
+
+            if (
+                series.dtype == "object"
+                or str(series.dtype).startswith("string")
+            ) and 1 < unique_count <= 100:
+                candidates.append(str(column))
+
+    return candidates
+
+
+# ==========================================================
+# Attack value analysis
+# ==========================================================
+
+def get_attack_counts(df, selected_column):
+    """
+    Count only the actual non-empty values in the selected column.
+    No attack labels or values are created.
+    """
+    if selected_column not in df.columns:
+        return pd.DataFrame(
+            columns=["Attack / Category", "Occurrences", "Share (%)"]
+        )
+
+    values = df[selected_column].dropna().astype(str).str.strip()
+    values = values[values != ""]
+
+    if values.empty:
+        return pd.DataFrame(
+            columns=["Attack / Category", "Occurrences", "Share (%)"]
+        )
+
+    counts = (
+        values.value_counts()
+        .rename_axis("Attack / Category")
+        .reset_index(name="Occurrences")
+    )
+
+    counts["Share (%)"] = (
+        counts["Occurrences"] / counts["Occurrences"].sum() * 100
+    ).round(2)
+
+    return counts
+
+
+def make_empty_figure(message):
     fig = go.Figure()
-
     fig.add_annotation(
         text=message,
         x=0.5,
@@ -161,65 +196,53 @@ def empty_figure(message):
         showarrow=False,
         font={"color": "#e5e7eb", "size": 15},
     )
-
     fig.update_layout(
         template="plotly_dark",
-        height=380,
-        margin={"l": 25, "r": 25, "t": 55, "b": 35},
+        height=400,
     )
-
     return fig
 
 
-def build_attack_graphs(attack_df):
-    """
-    Both graphs use only the attack labels and counts
-    present in the uploaded dataset.
-    """
-    counts = (
-        attack_df["Attack Type"]
-        .value_counts()
-        .rename_axis("Attack Type")
-        .reset_index(name="Occurrences")
-    )
+def make_graphs(counts, selected_column):
+    if counts.empty:
+        empty = make_empty_figure(
+            "No non-empty values found in the selected column."
+        )
+        return empty, empty
 
-    bar_fig = px.bar(
+    bar = px.bar(
         counts,
-        x="Attack Type",
+        x="Attack / Category",
         y="Occurrences",
         text="Occurrences",
-        title="Attack Types in Uploaded Dataset",
+        title=f"Values Found in '{selected_column}'",
     )
-
-    bar_fig.update_traces(textposition="outside")
-
-    bar_fig.update_layout(
+    bar.update_traces(textposition="outside")
+    bar.update_layout(
         template="plotly_dark",
-        height=420,
-        xaxis_title="Existing Attack Type",
+        height=440,
+        xaxis_title=selected_column,
         yaxis_title="Number of Records",
         showlegend=False,
         margin={"l": 35, "r": 25, "t": 65, "b": 110},
     )
 
-    pie_fig = px.pie(
+    pie = px.pie(
         counts,
-        names="Attack Type",
+        names="Attack / Category",
         values="Occurrences",
-        title="Distribution of Existing Attack Types",
+        title=f"Distribution of Values in '{selected_column}'",
     )
-
-    pie_fig.update_layout(
+    pie.update_layout(
         template="plotly_dark",
-        height=420,
-        margin={"l": 25, "r": 25, "t": 65, "b": 35},
+        height=440,
     )
 
-    return counts, bar_fig, pie_fig
+    return bar, pie
 
 
 # ==========================================================
-# Dashboard layout
+# Layout
 # ==========================================================
 
 app.layout = html.Div(
@@ -230,30 +253,19 @@ app.layout = html.Div(
             style={
                 "textAlign": "center",
                 "color": "#38bdf8",
-                "marginBottom": "8px",
             },
         ),
 
         html.P(
-            "Uploaded Attack Type Analysis",
+            "Explore attack categories and other labels present in "
+            "your uploaded dataset. No simulated records are added.",
             style={
                 "textAlign": "center",
                 "color": "#94a3b8",
-                "fontSize": "17px",
-            },
-        ),
-
-        html.P(
-            "Graphs use only the Attack Type values found in your uploaded "
-            "dataset. No synthetic attacks are added.",
-            style={
-                "textAlign": "center",
-                "color": "#cbd5e1",
                 "marginBottom": "24px",
             },
         ),
 
-        # Dataset upload
         html.Div(
             style=CARD,
             children=[
@@ -264,17 +276,15 @@ app.layout = html.Div(
                     children=html.Div(
                         [
                             html.Div(
-                                "Select or drag and drop your dataset",
+                                "Click or drag and drop a dataset",
                                 style={
                                     "fontSize": "18px",
                                     "fontWeight": "bold",
                                 },
                             ),
                             html.Div(
-                                "Supported formats: CSV, XLSX, XLSM | "
-                                "Maximum file size: 5 MB",
+                                "CSV, XLSX, or XLSM — maximum 5 MB",
                                 style={
-                                    "fontSize": "13px",
                                     "color": "#94a3b8",
                                     "marginTop": "8px",
                                 },
@@ -293,13 +303,29 @@ app.layout = html.Div(
                 ),
 
                 html.Div(
-                    id="dataset_name",
+                    id="dataset_status",
                     children="No dataset uploaded.",
                     style={
-                        "marginTop": "14px",
-                        "fontWeight": "bold",
+                        "marginTop": "12px",
                         "overflowWrap": "anywhere",
                     },
+                ),
+
+                html.Label(
+                    "Select the column containing attack types or categories:",
+                    style={
+                        "display": "block",
+                        "marginTop": "20px",
+                        "marginBottom": "8px",
+                    },
+                ),
+
+                dcc.Dropdown(
+                    id="attack_column",
+                    options=[],
+                    value=None,
+                    placeholder="Upload a dataset first",
+                    clearable=True,
                 ),
 
                 html.Button(
@@ -316,7 +342,6 @@ app.layout = html.Div(
             ],
         ),
 
-        # Summary cards
         html.Div(
             style={
                 "display": "grid",
@@ -329,33 +354,31 @@ app.layout = html.Div(
                 html.Div(
                     style=CARD,
                     children=[
-                        html.H4("Attack Type Records"),
+                        html.H4("Dataset Records"),
                         html.H2(
-                            id="total_rows",
+                            id="total_records",
                             children="—",
                             style={"color": "#38bdf8"},
                         ),
                     ],
                 ),
-
                 html.Div(
                     style=CARD,
                     children=[
-                        html.H4("Distinct Attack Types"),
+                        html.H4("Distinct Values"),
                         html.H2(
-                            id="distinct_attacks",
+                            id="distinct_values",
                             children="—",
                             style={"color": "#38bdf8"},
                         ),
                     ],
                 ),
-
                 html.Div(
                     style=CARD,
                     children=[
-                        html.H4("Most Frequent Attack Type"),
+                        html.H4("Most Frequent Value"),
                         html.H2(
-                            id="top_attack",
+                            id="most_frequent",
                             children="—",
                             style={
                                 "color": "#facc15",
@@ -367,64 +390,55 @@ app.layout = html.Div(
             ],
         ),
 
-        # Bar chart
         html.Div(
             style=CARD,
             children=[
-                html.H3("Attack Type Frequency"),
+                html.H3("Attack / Category Frequency"),
                 dcc.Graph(
                     id="attack_bar_graph",
-                    figure=empty_figure(
-                        "Upload a dataset to display its attack types."
+                    figure=make_empty_figure(
+                        "Upload a dataset and select a column."
                     ),
-                    config={"displaylogo": False, "responsive": True},
+                    config={"displaylogo": False},
                 ),
             ],
         ),
 
-        # Pie chart
         html.Div(
             style=CARD,
             children=[
-                html.H3("Attack Type Distribution"),
+                html.H3("Attack / Category Distribution"),
                 dcc.Graph(
                     id="attack_pie_graph",
-                    figure=empty_figure(
-                        "Upload a dataset to display attack distribution."
+                    figure=make_empty_figure(
+                        "Upload a dataset and select a column."
                     ),
-                    config={"displaylogo": False, "responsive": True},
+                    config={"displaylogo": False},
                 ),
             ],
         ),
 
-        # Existing values
         html.Div(
             style=CARD,
             children=[
-                html.H3("Attack Types Found in the Dataset"),
+                html.H3("Observed Values"),
                 html.P(
-                    "These labels are taken directly from the uploaded "
-                    "Attack Type column.",
+                    "Every value shown below comes from the selected "
+                    "column in the uploaded dataset.",
                     style={"color": "#94a3b8"},
                 ),
-                html.Div(id="attack_type_list"),
-            ],
-        ),
-
-        # Frequency table
-        html.Div(
-            style=CARD,
-            children=[
-                html.H3("Attack Type Counts"),
                 dash_table.DataTable(
-                    id="attack_summary_table",
+                    id="attack_table",
                     columns=[
-                        {"name": "Attack Type", "id": "Attack Type"},
+                        {
+                            "name": "Attack / Category",
+                            "id": "Attack / Category",
+                        },
                         {"name": "Occurrences", "id": "Occurrences"},
                         {"name": "Share (%)", "id": "Share (%)"},
                     ],
                     data=[],
-                    page_size=15,
+                    page_size=20,
                     sort_action="native",
                     style_table={"overflowX": "auto"},
                     style_header={
@@ -449,117 +463,190 @@ app.layout = html.Div(
 
 
 # ==========================================================
-# Dashboard callback
+# Callbacks
 # ==========================================================
 
 @app.callback(
     [
-        Output("dataset_name", "children"),
-        Output("total_rows", "children"),
-        Output("distinct_attacks", "children"),
-        Output("top_attack", "children"),
+        Output("dataset_status", "children"),
+        Output("attack_column", "options"),
+        Output("attack_column", "value"),
+        Output("total_records", "children"),
+        Output("distinct_values", "children"),
+        Output("most_frequent", "children"),
         Output("attack_bar_graph", "figure"),
         Output("attack_pie_graph", "figure"),
-        Output("attack_type_list", "children"),
-        Output("attack_summary_table", "data"),
+        Output("attack_table", "data"),
         Output("upload_data", "contents"),
     ],
     [
         Input("upload_data", "contents"),
+        Input("attack_column", "value"),
         Input("clear_dataset", "n_clicks"),
     ],
     [
         State("upload_data", "filename"),
+        State("upload_data", "contents"),
+        State("attack_column", "value"),
     ],
 )
-def update_dashboard(contents, clear_clicks, filename):
+def update_dashboard(
+    triggered_contents,
+    selected_column,
+    clear_clicks,
+    filename,
+    current_contents,
+    current_column,
+):
     ctx = dash.callback_context
+    trigger = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
 
-    # Clear the uploaded dataset and reset all visualizations.
-    if (
-        ctx.triggered
-        and ctx.triggered[0]["prop_id"].startswith("clear_dataset.")
-    ):
+    if trigger.startswith("clear_dataset."):
+        empty = make_empty_figure("Upload a dataset to begin.")
         return (
-            "Dataset cleared. Upload a dataset to begin.",
+            "Dataset cleared.",
+            [],
+            None,
             "—",
             "—",
             "—",
-            empty_figure("Upload a dataset to display attack types."),
-            empty_figure("Upload a dataset to display attack distribution."),
-            html.Div("No dataset loaded."),
+            empty,
+            empty,
             [],
             None,
         )
+
+    # Use the currently uploaded file when the user changes columns.
+    contents = current_contents
 
     if not contents:
+        empty = make_empty_figure("Upload a dataset to begin.")
         return (
             "No dataset uploaded.",
+            [],
+            None,
             "—",
             "—",
             "—",
-            empty_figure("Upload a dataset to display attack types."),
-            empty_figure("Upload a dataset to display attack distribution."),
-            html.Div("No dataset loaded."),
+            empty,
+            empty,
             [],
             None,
         )
 
-    attack_df, message = parse_upload(contents, filename)
+    df, status = read_dataset(contents, filename)
 
-    if attack_df is None or attack_df.empty:
+    if df is None:
+        empty = make_empty_figure(status)
         return (
-            message,
-            "0",
-            "0",
+            status,
+            [],
+            None,
             "—",
-            empty_figure(message),
-            empty_figure(message),
-            html.Div(message),
+            "—",
+            "—",
+            empty,
+            empty,
             [],
             contents,
         )
 
-    counts, bar_fig, pie_fig = build_attack_graphs(attack_df)
+    options = [
+        {"label": str(column), "value": str(column)}
+        for column in df.columns
+    ]
 
-    unique_attacks = attack_df["Attack Type"].drop_duplicates().tolist()
+    # When a new file is uploaded, choose a likely attack column.
+    if trigger.startswith("upload_data.contents"):
+        suggestions = suggest_attack_columns(df)
+        chosen = suggestions[0] if suggestions else None
+    else:
+        chosen = current_column
 
-    attack_list = html.Div(
-        [
-            html.Div(
-                str(attack),
-                style={
-                    "backgroundColor": "#0f172a",
-                    "border": "1px solid #334155",
-                    "borderRadius": "8px",
-                    "padding": "10px 12px",
-                    "marginBottom": "8px",
-                    "overflowWrap": "anywhere",
-                },
-            )
-            for attack in unique_attacks
-        ]
+    # Validate that the selected column still exists.
+    if chosen not in [str(column) for column in df.columns]:
+        suggestions = suggest_attack_columns(df)
+        chosen = suggestions[0] if suggestions else None
+
+    if chosen is None:
+        empty = make_empty_figure(
+            "Select the column containing attack names or categories."
+        )
+        return (
+            status + " Select the appropriate column below.",
+            options,
+            None,
+            f"{len(df):,}",
+            "—",
+            "—",
+            empty,
+            empty,
+            [],
+            contents,
+        )
+
+    # Match the displayed column name to its actual DataFrame column.
+    actual_column = next(
+        (column for column in df.columns if str(column) == chosen),
+        None,
     )
 
-    total_rows = len(attack_df)
-    distinct_count = len(unique_attacks)
-    top_attack = str(counts.iloc[0]["Attack Type"])
+    if actual_column is None:
+        empty = make_empty_figure("Please select a valid column.")
+        return (
+            status,
+            options,
+            None,
+            f"{len(df):,}",
+            "—",
+            "—",
+            empty,
+            empty,
+            [],
+            contents,
+        )
+
+    counts = get_attack_counts(df, actual_column)
+
+    if counts.empty:
+        empty = make_empty_figure(
+            "No non-empty values were found in this column."
+        )
+        return (
+            status + f" Selected column: {chosen}.",
+            options,
+            chosen,
+            f"{len(df):,}",
+            "0",
+            "—",
+            empty,
+            empty,
+            [],
+            contents,
+        )
+
+    bar_fig, pie_fig = make_graphs(counts, chosen)
+
+    total_values = int(counts["Occurrences"].sum())
+    distinct_values = len(counts)
+    most_frequent = str(counts.iloc[0]["Attack / Category"])
 
     return (
-        message,
-        f"{total_rows:,}",
-        f"{distinct_count:,}",
-        top_attack,
+        status + f" Selected column: {chosen}.",
+        options,
+        chosen,
+        f"{len(df):,}",
+        f"{distinct_values:,}",
+        most_frequent,
         bar_fig,
         pie_fig,
-        attack_list,
         counts.to_dict("records"),
         contents,
     )
 
 
 # ==========================================================
-# Run application
+# Start server
 # ==========================================================
 
 if __name__ == "__main__":
