@@ -140,25 +140,47 @@ def parse_upload(contents):
         df.columns = [normalize_column_name(c) for c in df.columns]
         aliases = {
             "attack": "attack_type", "threat": "attack_type",
-            "threat_type": "attack_type", "risk": "risk_score",
-            "risk_level_score": "risk_score", "latency_ms": "latency",
-            "response_time": "latency", "response_time_ms": "latency",
-            "event_time": "timestamp", "time": "timestamp",
+            "threat_type": "attack_type", "attack_category": "attack_type",
+            "transaction_type": "attack_type", "event_type": "attack_type",
+            "label": "attack_type", "class": "attack_type",
+            "risk": "risk_score", "risk_level_score": "risk_score",
+            "risk_probability": "risk_score", "fraud_probability": "risk_score",
+            "probability": "risk_score", "score": "risk_score",
+            "latency_ms": "latency", "response_time": "latency",
+            "response_time_ms": "latency", "processing_time": "latency",
+            "processing_time_ms": "latency", "event_time": "timestamp", "time": "timestamp",
         }
         df = df.rename(columns={c: aliases[c] for c in df.columns if c in aliases})
         notes = []
+        # A binary fraud indicator can be used as an explicitly disclosed risk proxy.
+        fraud_col = next((c for c in ("is_fraud", "fraud", "fraudulent", "is_fraudulent") if c in df.columns), None)
+        if "risk_score" not in df.columns and fraud_col:
+            raw = df[fraud_col].astype(str).str.strip().str.lower()
+            positive = {"1", "true", "yes", "fraud", "fraudulent", "positive"}
+            negative = {"0", "false", "no", "legitimate", "not_fraud", "negative"}
+            mapped = raw.map(lambda value: 1.0 if value in positive else (0.0 if value in negative else np.nan))
+            if mapped.notna().any():
+                df["risk_score"] = mapped.fillna(0.5)
+                notes.append(f"Risk chart uses '{fraud_col}' as a binary fraud-indicator proxy, not a calibrated risk probability.")
         if len(df) > MAX_UPLOAD_ROWS:
             df = df.head(MAX_UPLOAD_ROWS).copy()
             notes.append(f"Upload limited to {MAX_UPLOAD_ROWS:,} rows.")
         if "attack_type" not in df.columns:
-            df["attack_type"] = "unknown"
-            notes.append("No attack_type column: labels set to 'unknown'.")
+            # Prefer a useful categorical field for the event-count chart.
+            categorical = [c for c in df.columns if df[c].dtype == "object" and df[c].nunique(dropna=True) <= 30]
+            if categorical:
+                chosen = categorical[0]
+                df["attack_type"] = df[chosen].fillna("unknown").astype(str)
+                notes.append(f"Event-count chart uses '{chosen}' as a category; categories are not automatically verified attack labels.")
+            else:
+                df["attack_type"] = "unknown"
+                notes.append("No suitable categorical field found: event categories set to 'unknown'.")
         if "risk_score" not in df.columns:
             df["risk_score"] = 0.5
-            notes.append("No risk_score column: placeholder score 0.5 used.")
+            notes.append("No risk_score, risk probability, or recognized fraud indicator found: risk chart uses a placeholder score of 0.5. Add a meaningful risk column for data-driven risk values.")
         if "latency" not in df.columns:
             df["latency"] = 150.0
-            notes.append("No latency column: placeholder latency 150 ms used.")
+            notes.append("No latency/response-time column found: latency chart uses a placeholder of 150 ms. Add a measured latency column for data-driven latency values.")
         df["attack_type"] = df["attack_type"].fillna("unknown").astype(str).str.strip().str.lower().replace("", "unknown")
         df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce").fillna(0.5)
         df["latency"] = pd.to_numeric(df["latency"], errors="coerce").fillna(150.0)
@@ -345,10 +367,11 @@ app.layout = html.Div(style=STYLE, children=[
     html.H1("AO-LACCP SOC Intelligence Platform", style={"textAlign": "center", "color": "#38bdf8"}),
     html.P("Research prototype | Synthetic events and uploaded CSV data | Advisory decision support only",
            style={"textAlign": "center", "color": "#cbd5e1"}),
-    dcc.Store(id="event-store", storage_type="memory", data={
+    # Session storage survives browser refreshes in the same tab. It is not a server-side database.
+    dcc.Store(id="event-store", storage_type="session", data={
         "events": [], "dataset_name": "Synthetic event generator", "upload_message": ""
     }),
-    dcc.Store(id="ml-cache", storage_type="memory", data=None),
+    dcc.Store(id="ml-cache", storage_type="session", data=None),
     html.Div(style=CARD, children=[
         html.H3("Data Source"),
         dcc.Upload(id="upload_data", children=html.Div([
@@ -359,6 +382,8 @@ app.layout = html.Div(style=STYLE, children=[
         html.Div(id="selected_filename", style={"marginTop": "10px", "fontWeight": "bold", "color": "#7dd3fc"}),
         html.Div(id="dataset_name", style={"marginTop": "6px"}),
         html.Div(id="upload_status", style={"marginTop": "8px"}),
+        html.H4("Dataset Preview"),
+        html.Div(id="dataset_preview", children="Upload a CSV to preview its first rows.", style={"overflowX": "auto"}),
     ]),
     html.Div(style=CARD, children=[
         html.H3("Model and Cryptographic Configuration"),
@@ -411,7 +436,8 @@ def show_selected_filename(filename):
      Output("soc_attack_stream", "figure"), Output("soc_risk_gauge", "figure"),
      Output("dataset_name", "children"), Output("upload_status", "children"),
      Output("crypto_advice", "children"), Output("mitigation_table_container", "children"),
-     Output("soc_summary", "children"), Output("ml-cache", "data"), Output("interval", "disabled")],
+     Output("soc_summary", "children"), Output("ml-cache", "data"), Output("interval", "disabled"),
+     Output("dataset_preview", "children")],
     [Input("interval", "n_intervals"), Input("model_selector", "value"),
      Input("crypto_selector", "value"), Input("upload_data", "contents")],
     [State("event-store", "data"), State("upload_data", "filename"), State("ml-cache", "data")],
@@ -433,7 +459,7 @@ def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stor
             upload_message = message + f" Dashboard loaded {len(events):,} events from this dataset."
         else:
             upload_message = message
-    elif trigger == "interval" or trigger is None:
+    elif trigger == "interval" or (trigger is None and dataset_name == "Synthetic event generator"):
         events.append(generate_synthetic_event(crypto_mode))
         events = events[-MAX_EVENTS:]
 
@@ -444,7 +470,7 @@ def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stor
         return (new_state, "Waiting for the first event...", empty, empty, empty, make_risk_gauge(0),
                 f"Dataset: {dataset_name}", upload_message, "No recommendation available yet.",
                 html.Div("Waiting for events..."), html.Div("No event data is available yet."), cached_ml_result,
-                dataset_name != "Synthetic event generator")
+                dataset_name != "Synthetic event generator", "Upload a CSV to preview its first rows.")
 
     defaults = {"attack_type": "unknown", "risk_score": 0.5, "latency": 150.0,
                 "crypto": "Unknown", "timestamp": "", "source": "Unknown"}
@@ -511,9 +537,18 @@ def update_dashboard(n_intervals, model_type, crypto_mode, upload_contents, stor
     status = upload_message or "Synthetic event stream active."
     new_state = {"events": df.drop(columns=["event_number"]).to_dict(orient="records"),
                  "dataset_name": dataset_name, "upload_message": upload_message}
+    preview_df = df.drop(columns=["event_number"], errors="ignore").head(8).copy()
+    preview = dash_table.DataTable(
+        data=preview_df.to_dict("records"),
+        columns=[{"name": str(c), "id": str(c)} for c in preview_df.columns],
+        page_size=8,
+        style_table={"overflowX": "auto"},
+        style_header={"backgroundColor": "#1e293b", "color": "white", "fontWeight": "bold"},
+        style_cell={"backgroundColor": "#0f172a", "color": "#e2e8f0", "minWidth": "110px", "maxWidth": "240px", "whiteSpace": "normal", "textAlign": "left", "padding": "8px"},
+    )
     return (new_state, live_feed, make_risk_figure(df), make_latency_figure(df), make_attack_figure(df),
             make_risk_gauge(avg_risk), f"Dataset: {dataset_name}", status, advice, table, summary, ml_result,
-            dataset_name != "Synthetic event generator")
+            dataset_name != "Synthetic event generator", preview)
 
 
 @app.callback(
