@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import logging
 import random
 from datetime import datetime, timezone
@@ -130,13 +131,20 @@ def normalize_column_name(name):
 def parse_upload(contents):
     """Parse and validate a CSV upload; missing fields use explicit placeholders."""
     if not contents:
-        return [], "No file was supplied."
+        return [], "No file was supplied.", [], []
     try:
         _, encoded = contents.split(",", 1)
-        decoded = base64.b64decode(encoded, validate=True)
-        df = pd.read_csv(io.BytesIO(decoded), nrows=MAX_UPLOAD_ROWS + 1)
-        if df.empty:
-            return [], "The uploaded CSV contains no data rows."
+        decoded = base64.b64decode(encoded)
+        # Read the original table first so the preview shows the user's actual CSV
+        # columns and values, not only the normalized chart fields.
+        raw_df = pd.read_csv(io.BytesIO(decoded), nrows=MAX_UPLOAD_ROWS + 1, encoding="utf-8-sig")
+        if raw_df.empty:
+            return [], "The uploaded CSV contains no data rows.", [], []
+        raw_df = raw_df.head(MAX_UPLOAD_ROWS).copy()
+        preview_columns = [str(c) for c in raw_df.columns]
+        # JSON round-trip converts NumPy/Pandas values and NaN into browser-safe data.
+        preview_rows = json.loads(raw_df.head(10).to_json(orient="records", date_format="iso"))
+        df = raw_df.copy()
         df.columns = [normalize_column_name(c) for c in df.columns]
         aliases = {
             "attack": "attack_type", "threat": "attack_type",
@@ -204,10 +212,10 @@ def parse_upload(contents):
         events = df[["timestamp", "attack_type", "risk_score", "latency", "crypto", "source"]].to_dict(orient="records")
         message = " ".join(notes) if notes else f"Successfully loaded {len(events):,} rows."
         message += f" Dataset contains {len(df.columns):,} columns."
-        return events, message
+        return events, message, preview_rows, preview_columns
     except Exception as exc:
         logger.exception("CSV upload failed")
-        return [], f"Could not read the CSV: {type(exc).__name__}."
+        return [], f"Could not read the CSV: {type(exc).__name__}: {exc}", [], []
 
 
 def generate_mitigation_table(df):
@@ -453,7 +461,7 @@ def load_dataset_or_generate_events(upload_contents, n_intervals, stored_state, 
     current_name = stored_state.get("dataset_name", "Synthetic event generator")
 
     if trigger == "upload_data" and upload_contents:
-        events, message = parse_upload(upload_contents)
+        events, message, preview_rows, preview_columns = parse_upload(upload_contents)
         if not events:
             # Keep the currently loaded data if a new file fails to parse.
             return dash.no_update, message, current_name != "Synthetic event generator"
@@ -464,6 +472,9 @@ def load_dataset_or_generate_events(upload_contents, n_intervals, stored_state, 
             "dataset_name": name,
             "upload_message": message,
             "data_source": "uploaded_csv",
+            "preview_rows": preview_rows,
+            "preview_columns": preview_columns,
+            "upload_version": utc_now(),
         }
         return new_state, message, True
 
@@ -581,14 +592,29 @@ def render_dashboard(stored_state, model_type, crypto_mode, cached_ml_result):
         summary.append(html.P(f"Held-out evaluation: accuracy {m['Accuracy']:.1%}; F1 {m['F1']:.3f}; test rows {m['Test observations']}."))
     summary.append(html.Small("Synthetic-data metrics are not evidence of production detection performance."))
 
-    preview_df = df.drop(columns=["event_number"], errors="ignore").head(8).copy()
-    preview = dash_table.DataTable(
-        data=preview_df.to_dict("records"),
-        columns=[{"name": str(c), "id": str(c)} for c in preview_df.columns],
-        page_size=8, style_table={"overflowX": "auto"},
+    # Prefer the original CSV preview saved during upload. This makes the preview
+    # visibly reflect the actual uploaded file rather than only derived chart fields.
+    saved_preview_rows = stored_state.get("preview_rows") if isinstance(stored_state, dict) else None
+    saved_preview_columns = stored_state.get("preview_columns") if isinstance(stored_state, dict) else None
+    if saved_preview_rows and saved_preview_columns:
+        preview_data = saved_preview_rows
+        preview_columns = [{"name": str(c), "id": str(c)} for c in saved_preview_columns]
+        preview_heading = html.Div([
+            html.Strong(f"Showing the first {len(preview_data)} rows from the original uploaded CSV."),
+            html.Div(f"Original columns: {', '.join(map(str, saved_preview_columns))}", style={"fontSize": "12px", "color": "#94a3b8", "marginTop": "4px"}),
+        ], style={"marginBottom": "8px"})
+    else:
+        preview_df = df.drop(columns=["event_number"], errors="ignore").head(8).copy()
+        preview_data = json.loads(preview_df.to_json(orient="records", date_format="iso"))
+        preview_columns = [{"name": str(c), "id": str(c)} for c in preview_df.columns]
+        preview_heading = html.Div("Showing current event records.", style={"marginBottom": "8px"})
+    preview = html.Div([preview_heading, dash_table.DataTable(
+        data=preview_data,
+        columns=preview_columns,
+        page_size=10, style_table={"overflowX": "auto"},
         style_header={"backgroundColor": "#1e293b", "color": "white", "fontWeight": "bold"},
         style_cell={"backgroundColor": "#0f172a", "color": "#e2e8f0", "minWidth": "110px", "maxWidth": "240px", "whiteSpace": "normal", "textAlign": "left", "padding": "8px"},
-    )
+    )])
     return (live_feed, make_risk_figure(df), make_latency_figure(df), make_attack_figure(df),
             make_risk_gauge(avg_risk), f"Dataset: {dataset_name}", advice, table, summary, ml_cache_out, preview)
 
