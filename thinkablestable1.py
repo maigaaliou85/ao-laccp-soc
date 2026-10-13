@@ -1,94 +1,58 @@
 
-# ============================================================
-# AO-LACCP: Robust Baseline vs AO-LACCP Boxplot
-# Compatible with newer Matplotlib versions
-# ============================================================
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import streamlit as st
 import inspect
 
-# Validate that the required columns exist
-if bcol not in df.columns or acol not in df.columns:
-    st.error(
-        f"Cannot create boxplot: missing column(s). "
-        f"Required: '{bcol}' and '{acol}'."
-    )
+st.title("AO-LACCP SOC — Performance Comparison")
+
+# TEST DATA ONLY: replace with actual measured results when available.
+rng = np.random.default_rng(42)
+df = pd.DataFrame({
+    "Baseline_Risk": rng.normal(0.55, 0.08, 30).clip(0, 1),
+    "AO_LACCP_Risk": rng.normal(0.32, 0.05, 30).clip(0, 1),
+})
+
+bcol = "Baseline_Risk"
+acol = "AO_LACCP_Risk"
+
+baseline = df[bcol].replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
+ao_values = df[acol].replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
+
+if len(baseline) < 2 or len(ao_values) < 2:
+    st.error("Not enough valid data to create the boxplot.")
 else:
-    # Convert data to numeric and remove invalid values
-    baseline_values = (
-        pd.to_numeric(df[bcol], errors="coerce")
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna()
-        .to_numpy()
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    params = inspect.signature(ax.boxplot).parameters
+    label_arg = "tick_labels" if "tick_labels" in params else "labels"
+
+    result = ax.boxplot(
+        [baseline, ao_values],
+        positions=[1, 2],
+        patch_artist=True,
+        showmeans=True,
+        **{label_arg: ["Baseline", "AO-LACCP"]}
     )
 
-    ao_laccp_values = (
-        pd.to_numeric(df[acol], errors="coerce")
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna()
-        .to_numpy()
+    for box, color in zip(result["boxes"], ["lightgray", "lightblue"]):
+        box.set_facecolor(color)
+
+    ax.set_title("Baseline vs AO-LACCP Risk (Test Data)")
+    ax.set_ylabel("Synthetic risk score")
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+
+    st.warning(
+        "TEST DATA ONLY. These values are generated for chart testing "
+        "and must not be presented as empirical research findings."
     )
 
-    # Ensure both groups contain valid observations
-    if len(baseline_values) == 0 or len(ao_laccp_values) == 0:
-        st.warning(
-            "The boxplot cannot be generated because "
-            "one or both groups contain no valid numeric data."
-        )
-    else:
-        # Create the axes if they do not already exist
-        if "ax" not in locals():
-            fig, ax = plt.subplots(figsize=(8, 5))
-        else:
-            fig = ax.figure
-
-        # Support both newer and older Matplotlib versions
-        boxplot_parameters = inspect.signature(ax.boxplot).parameters
-
-        label_parameter = (
-            "tick_labels"
-            if "tick_labels" in boxplot_parameters
-            else "labels"
-        )
-
-        boxplot_options = {
-            "positions": [1, 2],
-            "patch_artist": True,
-            "showmeans": True,
-            "meanline": False,
-        }
-
-        boxplot_options[label_parameter] = [
-            "Baseline",
-            "AO-LACCP",
-        ]
-
-        # Generate the comparison boxplot
-        boxplot_result = ax.boxplot(
-            [baseline_values, ao_laccp_values],
-            **boxplot_options
-        )
-
-        # Distinguish the two groups visually
-        box_colors = ["lightgray", "lightblue"]
-
-        for patch, color in zip(
-            boxplot_result["boxes"], box_colors
-        ):
-            patch.set_facecolor(color)
-
-        # Configure the chart
-        ax.set_title(
-            "Baseline vs AO-LACCP Performance Comparison"
-        )
-        ax.set_ylabel("Metric Value")
-        ax.set_xticks([1, 2])
-        ax.set_xticklabels(["Baseline", "AO-LACCP"])
-        ax.grid(axis="y", linestyle="--", alpha=0.4)
-
-        fig.tight_layout()
-
-        # Display using Streamlit
-        st.pyplot(fig)
+    st.dataframe(
+        df.describe().T,
+        use_container_width=True
+    )
