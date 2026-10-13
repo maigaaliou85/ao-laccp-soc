@@ -9,7 +9,7 @@ st.title("AO-LACCP SOC Comparison")
 uploaded_file = st.file_uploader(
     "Upload dataset (CSV)",
     type=["csv"],
-    key="soc_csv"
+    key="ao_laccp_dataset"
 )
 
 if uploaded_file is None:
