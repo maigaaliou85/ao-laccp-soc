@@ -1,175 +1,92 @@
 
-# ============================================================
-# AO-LACCP SOC — Dataset Upload and Performance Comparison
-# ============================================================
-
-import inspect
-import numpy as np
+import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import streamlit as st
+import numpy as np
 
-st.set_page_config(
-    page_title="AO-LACCP SOC Comparison",
-    layout="wide"
-)
+st.title("AO-LACCP SOC Comparison")
 
-st.title("AO-LACCP SOC — Performance Comparison")
-st.caption("Upload a CSV dataset to compare baseline and AO-LACCP metrics.")
-
-# 1. Upload dataset
 uploaded_file = st.file_uploader(
-    "Upload your CSV dataset",
+    "Upload dataset (CSV)",
     type=["csv"],
-    help="Upload a CSV containing baseline and AO-LACCP metric columns."
+    key="soc_csv"
 )
 
 if uploaded_file is None:
-    st.info("Upload a CSV file to begin.")
     st.stop()
 
-# 2. Read dataset safely
+# Read only the CSV header first
 try:
-    df = pd.read_csv(uploaded_file)
-except Exception as exc:
-    st.error(f"Could not read the CSV file: {exc}")
+    headers = pd.read_csv(uploaded_file, nrows=0).columns.tolist()
+except Exception as e:
+    st.error(f"Could not read CSV header: {e}")
     st.stop()
 
-if df.empty:
-    st.error("The uploaded CSV contains no rows.")
+if len(headers) < 2:
+    st.error("The CSV needs at least two columns.")
     st.stop()
 
-st.success(f"Dataset loaded: {len(df)} rows and {len(df.columns)} columns.")
-
-with st.expander("Preview uploaded dataset", expanded=True):
-    st.dataframe(df.head(20), use_container_width=True)
-
-# 3. Identify numeric columns
-numeric_columns = []
-for col in df.columns:
-    converted = pd.to_numeric(df[col], errors="coerce")
-    if converted.notna().sum() >= 2:
-        numeric_columns.append(col)
-
-if len(numeric_columns) < 2:
-    st.error(
-        "The dataset must contain at least two columns with "
-        "two or more numeric values each."
-    )
-    st.stop()
-
-# 4. Choose columns
-def find_default(options, terms, fallback_index):
-    for option in options:
-        name = str(option).lower().replace("-", "_").replace(" ", "_")
-        if any(term in name for term in terms):
-            return option
-    return options[min(fallback_index, len(options) - 1)]
-
-default_baseline = find_default(
-    numeric_columns, ["baseline", "traditional", "control"], 0
-)
-default_ao = find_default(
-    numeric_columns, ["ao_laccp", "ao-laccp", "aolaccp", "proposed"], 1
-)
-
-st.subheader("Select comparison metrics")
 col1, col2 = st.columns(2)
 
 with col1:
     bcol = st.selectbox(
-        "Baseline metric",
-        numeric_columns,
-        index=numeric_columns.index(default_baseline)
+        "Baseline column",
+        headers,
+        index=0
     )
 
 with col2:
+    default_ao_index = next(
+        (i for i, c in enumerate(headers)
+         if any(k in c.lower() for k in ["ao_laccp", "ao-laccp", "aolaccp"])),
+        min(1, len(headers) - 1)
+    )
     acol = st.selectbox(
-        "AO-LACCP metric",
-        numeric_columns,
-        index=numeric_columns.index(default_ao)
+        "AO-LACCP column",
+        headers,
+        index=default_ao_index
     )
 
 if bcol == acol:
-    st.warning("Select two different columns for comparison.")
+    st.warning("Choose two different columns.")
     st.stop()
 
-# 5. Clean selected values
-baseline_values = (
-    pd.to_numeric(df[bcol], errors="coerce")
-    .replace([np.inf, -np.inf], np.nan)
-    .dropna()
-    .to_numpy(dtype=float)
-)
+# Read only the selected columns, not the entire dataset
+if st.button("Load selected metrics"):
+    try:
+        uploaded_file.seek(0)
+        data = pd.read_csv(
+            uploaded_file,
+            usecols=[bcol, acol]
+        )
 
-ao_values = (
-    pd.to_numeric(df[acol], errors="coerce")
-    .replace([np.inf, -np.inf], np.nan)
-    .dropna()
-    .to_numpy(dtype=float)
-)
+        for col in [bcol, acol]:
+            data[col] = pd.to_numeric(data[col], errors="coerce")
 
-if len(baseline_values) < 2 or len(ao_values) < 2:
-    st.error("Each selected column must contain at least two valid numeric values.")
-    st.stop()
+        data = data.replace([np.inf, -np.inf], np.nan).dropna()
 
-# 6. Display boxplot
-st.subheader("Baseline vs AO-LACCP boxplot")
+        if len(data) < 2:
+            st.error("Not enough valid numeric rows in the selected columns.")
+            st.stop()
 
-fig, ax = plt.subplots(figsize=(9, 5))
-params = inspect.signature(ax.boxplot).parameters
-label_arg = "tick_labels" if "tick_labels" in params else "labels"
+        st.success(f"Loaded {len(data):,} valid comparison rows.")
 
-result = ax.boxplot(
-    [baseline_values, ao_values],
-    positions=[1, 2],
-    patch_artist=True,
-    showmeans=True,
-    **{label_arg: ["Baseline", "AO-LACCP"]}
-)
+        st.dataframe(data.head(10), use_container_width=True)
 
-for box, color in zip(result["boxes"], ["lightgray", "lightblue"]):
-    box.set_facecolor(color)
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.boxplot(
+            [data[bcol].to_numpy(), data[acol].to_numpy()],
+            tick_labels=["Baseline", "AO-LACCP"]
+            if "tick_labels" in __import__("inspect").signature(ax.boxplot).parameters
+            else ["Baseline", "AO-LACCP"],
+            showmeans=True
+        )
+        ax.set_title("Baseline vs AO-LACCP")
+        ax.set_ylabel("Metric value")
+        ax.grid(axis="y", linestyle="--", alpha=0.4)
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
 
-ax.set_title(f"Comparison: {bcol} vs {acol}")
-ax.set_ylabel("Metric value")
-ax.grid(axis="y", linestyle="--", alpha=0.4)
-fig.tight_layout()
-st.pyplot(fig)
-plt.close(fig)
-
-# 7. Descriptive statistics
-summary = pd.DataFrame({
-    "Group": ["Baseline", "AO-LACCP"],
-    "Selected column": [bcol, acol],
-    "Valid observations": [len(baseline_values), len(ao_values)],
-    "Mean": [baseline_values.mean(), ao_values.mean()],
-    "Median": [np.median(baseline_values), np.median(ao_values)],
-    "Standard deviation": [
-        baseline_values.std(ddof=1),
-        ao_values.std(ddof=1)
-    ]
-})
-
-st.subheader("Descriptive statistics")
-st.dataframe(summary, use_container_width=True)
-
-# 8. Download cleaned comparison data
-comparison_df = pd.DataFrame({
-    "Baseline": pd.Series(baseline_values),
-    "AO-LACCP": pd.Series(ao_values)
-})
-
-st.download_button(
-    "Download selected comparison data",
-    data=comparison_df.to_csv(index=False).encode("utf-8"),
-    file_name="ao_laccp_comparison.csv",
-    mime="text/csv"
-)
-
-st.caption(
-    "Interpret the chart according to the selected metric. "
-    "Lower values may be preferable for risk and latency, while "
-    "higher values may be preferable for agility. This app compares "
-    "uploaded values; it does not train or execute the SOC AI model."
-)
+    except Exception as e:
+        st.error(f"Could not load the selected columns: {e}")
