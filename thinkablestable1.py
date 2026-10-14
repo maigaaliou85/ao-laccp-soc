@@ -1,91 +1,131 @@
+
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
-st.title("AO-LACCP SOC Comparison")
-
-uploaded_file = st.file_uploader(
-    "Upload dataset (CSV)",
-    type=["csv"],
-    key="ao_laccp_dataset"
+st.set_page_config(
+    page_title="AO-LACCP SOC Comparison",
+    layout="wide"
 )
 
-if uploaded_file is None:
-    st.stop()
+st.title("AO-LACCP SOC Comparison")
 
-# Read only the CSV header first
-try:
-    headers = pd.read_csv(uploaded_file, nrows=0).columns.tolist()
-except Exception as e:
-    st.error(f"Could not read CSV header: {e}")
-    st.stop()
+st.markdown(
+    """
+    Compare baseline and AO-LACCP metrics using built-in
+    illustrative data.
 
-if len(headers) < 2:
-    st.error("The CSV needs at least two columns.")
-    st.stop()
+    **Important:** These values are illustrative examples,
+    not actual experimental results.
+    """
+)
 
+# --------------------------------------------------
+# 1. Built-in illustrative comparison data
+# --------------------------------------------------
+# Replace these example values with verified results
+# from your AO-LACCP evaluation when available.
+
+data = pd.DataFrame({
+    "Baseline": [
+        0.72, 0.75, 0.69, 0.78, 0.74,
+        0.71, 0.76, 0.73, 0.70, 0.77
+    ],
+    "AO-LACCP": [
+        0.78, 0.80, 0.74, 0.82, 0.79,
+        0.76, 0.81, 0.77, 0.75, 0.83
+    ]
+})
+
+# --------------------------------------------------
+# 2. Select metric
+# --------------------------------------------------
+metric = st.selectbox(
+    "Metric being compared",
+    [
+        "Illustrative classification score",
+        "Accuracy",
+        "Macro Precision",
+        "Macro Recall",
+        "Macro F1",
+        "Latency (ms)",
+        "Risk Score"
+    ]
+)
+
+if metric != "Illustrative classification score":
+    st.warning(
+        "The displayed values are illustrative only. "
+        "Select a metric only for demonstration; the "
+        "values are not verified results for that metric."
+    )
+
+# --------------------------------------------------
+# 3. Display comparison data
+# --------------------------------------------------
 col1, col2 = st.columns(2)
 
 with col1:
-    bcol = st.selectbox(
-        "Baseline column",
-        headers,
-        index=0
+    st.subheader("Baseline")
+    st.metric(
+        "Mean",
+        f"{data['Baseline'].mean():.3f}"
     )
 
 with col2:
-    default_ao_index = next(
-        (i for i, c in enumerate(headers)
-         if any(k in c.lower() for k in ["ao_laccp", "ao-laccp", "aolaccp"])),
-        min(1, len(headers) - 1)
-    )
-    acol = st.selectbox(
-        "AO-LACCP column",
-        headers,
-        index=default_ao_index
+    st.subheader("AO-LACCP")
+    st.metric(
+        "Mean",
+        f"{data['AO-LACCP'].mean():.3f}"
     )
 
-if bcol == acol:
-    st.warning("Choose two different columns.")
-    st.stop()
+st.subheader("Comparison Data")
+st.dataframe(data, use_container_width=True)
 
-# Read only the selected columns, not the entire dataset
-if st.button("Load selected metrics"):
-    try:
-        uploaded_file.seek(0)
-        data = pd.read_csv(
-            uploaded_file,
-            usecols=[bcol, acol]
-        )
+# --------------------------------------------------
+# 4. Boxplot comparison
+# --------------------------------------------------
+st.subheader("Baseline vs AO-LACCP")
 
-        for col in [bcol, acol]:
-            data[col] = pd.to_numeric(data[col], errors="coerce")
+fig, ax = plt.subplots(figsize=(8, 4))
 
-        data = data.replace([np.inf, -np.inf], np.nan).dropna()
+ax.boxplot(
+    [
+        data["Baseline"].to_numpy(),
+        data["AO-LACCP"].to_numpy()
+    ],
+    labels=["Baseline", "AO-LACCP"],
+    showmeans=True
+)
 
-        if len(data) < 2:
-            st.error("Not enough valid numeric rows in the selected columns.")
-            st.stop()
+ax.set_title("Illustrative Baseline vs AO-LACCP")
+ax.set_ylabel("Illustrative metric value")
+ax.grid(axis="y", linestyle="--", alpha=0.4)
 
-        st.success(f"Loaded {len(data):,} valid comparison rows.")
+fig.tight_layout()
+st.pyplot(fig)
+plt.close(fig)
 
-        st.dataframe(data.head(10), use_container_width=True)
+# --------------------------------------------------
+# 5. Interpretation
+# --------------------------------------------------
+st.subheader("Interpretation")
 
-        fig, ax = plt.subplots(figsize=(7, 4))
-        ax.boxplot(
-            [data[bcol].to_numpy(), data[acol].to_numpy()],
-            tick_labels=["Baseline", "AO-LACCP"]
-            if "tick_labels" in __import__("inspect").signature(ax.boxplot).parameters
-            else ["Baseline", "AO-LACCP"],
-            showmeans=True
-        )
-        ax.set_title("Baseline vs AO-LACCP")
-        ax.set_ylabel("Metric value")
-        ax.grid(axis="y", linestyle="--", alpha=0.4)
-        fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+difference = (
+    data["AO-LACCP"].mean()
+    - data["Baseline"].mean()
+)
 
-    except Exception as e:
-        st.error(f"Could not load the selected columns: {e}")
+st.write(
+    f"Illustrative mean difference (AO-LACCP minus "
+    f"baseline): {difference:.3f}"
+)
+
+st.info(
+    "A difference in the displayed values does not "
+    "establish scientific superiority. Use verified "
+    "held-out evaluation results, comparable test "
+    "conditions, uncertainty intervals, and appropriate "
+    "statistical tests before drawing conclusions."
+)
