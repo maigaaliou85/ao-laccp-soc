@@ -11,22 +11,17 @@ st.set_page_config(
 
 st.title("AO-LACCP SOC Comparison")
 
-st.markdown(
-    """
-    Compare baseline and AO-LACCP metrics using built-in
-    illustrative data.
-
-    **Important:** These values are illustrative examples,
-    not actual experimental results.
-    """
+st.write(
+    "Compare baseline and AO-LACCP using built-in "
+    "illustrative data."
 )
 
-# --------------------------------------------------
-# 1. Built-in illustrative comparison data
-# --------------------------------------------------
-# Replace these example values with verified results
-# from your AO-LACCP evaluation when available.
+st.warning(
+    "Illustrative data only. These values are not "
+    "verified experimental results."
+)
 
+# Built-in demonstration data
 data = pd.DataFrame({
     "Baseline": [
         0.72, 0.75, 0.69, 0.78, 0.74,
@@ -38,32 +33,7 @@ data = pd.DataFrame({
     ]
 })
 
-# --------------------------------------------------
-# 2. Select metric
-# --------------------------------------------------
-metric = st.selectbox(
-    "Metric being compared",
-    [
-        "Illustrative classification score",
-        "Accuracy",
-        "Macro Precision",
-        "Macro Recall",
-        "Macro F1",
-        "Latency (ms)",
-        "Risk Score"
-    ]
-)
-
-if metric != "Illustrative classification score":
-    st.warning(
-        "The displayed values are illustrative only. "
-        "Select a metric only for demonstration; the "
-        "values are not verified results for that metric."
-    )
-
-# --------------------------------------------------
-# 3. Display comparison data
-# --------------------------------------------------
+# Display comparison statistics
 col1, col2 = st.columns(2)
 
 with col1:
@@ -80,12 +50,11 @@ with col2:
         f"{data['AO-LACCP'].mean():.3f}"
     )
 
+# Display data
 st.subheader("Comparison Data")
 st.dataframe(data, use_container_width=True)
 
-# --------------------------------------------------
-# 4. Boxplot comparison
-# --------------------------------------------------
+# Plot comparison
 st.subheader("Baseline vs AO-LACCP")
 
 fig, ax = plt.subplots(figsize=(8, 4))
@@ -99,33 +68,25 @@ ax.boxplot(
     showmeans=True
 )
 
-ax.set_title("Illustrative Baseline vs AO-LACCP")
 ax.set_ylabel("Illustrative metric value")
+ax.set_title("Baseline vs AO-LACCP Comparison")
 ax.grid(axis="y", linestyle="--", alpha=0.4)
 
 fig.tight_layout()
 st.pyplot(fig)
 plt.close(fig)
 
-# --------------------------------------------------
-# 5. Interpretation
-# --------------------------------------------------
-st.subheader("Interpretation")
-
+# Display mean difference
 difference = (
     data["AO-LACCP"].mean()
     - data["Baseline"].mean()
 )
 
-st.write(
-    f"Illustrative mean difference (AO-LACCP minus "
-    f"baseline): {difference:.3f}"
-)
+st.subheader("Comparison Result")
+st.write(f"Mean difference (AO-LACCP − Baseline): {difference:.3f}")
 
 st.info(
-    "A difference in the displayed values does not "
-    "establish scientific superiority. Use verified "
-    "held-out evaluation results, comparable test "
-    "conditions, uncertainty intervals, and appropriate "
-    "statistical tests before drawing conclusions."
+    "These demonstration values do not establish "
+    "scientific superiority. Replace them with actual "
+    "evaluation results before reporting research findings."
 )
